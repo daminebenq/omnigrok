@@ -253,7 +253,7 @@ export async function getAvailableModels(env: InferenceEnv): Promise<ModelInfo[]
 
 // --- Streaming + agent loop ----------------------------------------------
 
-import { BUILTIN_TOOLS, dispatchTool, type ToolEnv } from "./tools";
+import { BUILTIN_TOOLS, dispatchTool, type ToolEnv, type Toolset } from "./tools";
 
 export type StreamEvent =
   | { type: "token"; content: string }
@@ -316,7 +316,8 @@ async function callProvider(
   key: string,
   model: string,
   messages: ChatMessage[],
-  withTools: boolean
+  withTools: boolean,
+  toolSchemas: typeof BUILTIN_TOOLS
 ): Promise<Response> {
   return fetch(url, {
     method: "POST",
@@ -327,7 +328,7 @@ async function callProvider(
       stream: true,
       max_tokens: 4096,
       temperature: 0.7,
-      ...(withTools ? { tools: BUILTIN_TOOLS, tool_choice: "auto" } : {}),
+      ...(withTools && toolSchemas.length ? { tools: toolSchemas, tool_choice: "auto" } : {}),
     }),
   });
 }
@@ -342,8 +343,10 @@ async function* runAgent(
   initialMessages: ChatMessage[],
   model: string,
   env: InferenceEnv,
-  enableTools: boolean
+  enableTools: boolean,
+  toolset?: Toolset
 ): AsyncGenerator<StreamEvent, { text: string; reasoning: string }> {
+  const toolSchemas = toolset?.schemas ?? BUILTIN_TOOLS;
   const resolved = resolveProvider(model, env);
   if (!resolved) throw new Error(`No provider configured for model: ${model}`);
   const { url, key, model: providerModel } = resolved;
@@ -357,13 +360,13 @@ async function* runAgent(
   let useTools = enableTools;
 
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-    let res = await callProvider(url, key, providerModel, convo, useTools);
+    let res = await callProvider(url, key, providerModel, convo, useTools, toolSchemas);
 
     // Not every OpenAI-compatible endpoint accepts a `tools` array. If that is
     // what it rejected, drop tools and try once more rather than failing.
     if (!res.ok && useTools && res.status >= 400 && res.status < 500) {
       useTools = false;
-      res = await callProvider(url, key, providerModel, convo, false);
+      res = await callProvider(url, key, providerModel, convo, false, toolSchemas);
     }
     if (!res.ok || !res.body) {
       const detail = await res.text().catch(() => "");
@@ -443,7 +446,7 @@ async function* runAgent(
         // Fall through with empty args; the tool reports the problem.
       }
 
-      const result = await dispatchTool(call.name, args, env as ToolEnv);
+      const result = await dispatchTool(call.name, args, env as ToolEnv, toolset);
       const failed = result.startsWith("Error:");
       yield {
         type: "tool",
@@ -481,7 +484,7 @@ export async function streamInference(
   messages: ChatMessage[],
   model: string,
   env: InferenceEnv,
-  opts: { tools?: boolean } = {}
+  opts: { tools?: boolean; toolset?: Toolset } = {}
 ): Promise<StreamResult> {
   // Resolve eagerly so a misconfigured model fails as an HTTP error rather
   // than as a dead stream the client cannot interpret.
@@ -490,7 +493,7 @@ export async function streamInference(
   }
 
   const encoder = new TextEncoder();
-  const agent = runAgent(messages, model, env, opts.tools !== false);
+  const agent = runAgent(messages, model, env, opts.tools !== false, opts.toolset);
 
   let resolveCompletion!: (v: { text: string; reasoning: string }) => void;
   const completion = new Promise<{ text: string; reasoning: string }>((res) => {

@@ -31,8 +31,10 @@ export interface Project extends BaseRecord {
 
 export interface McpServer extends BaseRecord {
   url: string;
-  /** Stored server-side only; never returned to the browser. */
+  /** All stored server-side only; never returned to the browser. */
   authToken?: string;
+  accessClientId?: string;
+  accessClientSecret?: string;
   enabled: boolean;
 }
 
@@ -81,6 +83,10 @@ export async function deleteRecord(
 /** Strips fields that must never reach the browser (e.g. MCP auth tokens). */
 export function redact<T extends BaseRecord>(col: Collection, record: T): T {
   if (col !== "mcps") return record;
-  const { authToken, ...rest } = record as unknown as McpServer;
-  return { ...rest, hasAuth: Boolean(authToken) } as unknown as T;
+  const { authToken, accessClientSecret, ...rest } = record as unknown as McpServer;
+  return {
+    ...rest,
+    hasAuth: Boolean(authToken),
+    hasServiceToken: Boolean(accessClientSecret),
+  } as unknown as T;
 }

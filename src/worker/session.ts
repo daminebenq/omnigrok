@@ -10,6 +10,7 @@ import { streamInference, type ChatMessage, type StreamEvent } from "./inference
 import type { InferenceEnv } from "./inference";
 import { getConversation, saveConversation, type Conversation, type Message } from "./storage";
 import { recordUsage } from "./usage";
+import { buildToolset } from "./tools";
 
 export interface SessionEnv extends InferenceEnv {
   OMNIGROK_KV: KVNamespace;
@@ -185,7 +186,10 @@ export class ChatSession implements DurableObject {
         content: m.content,
       }));
 
-      const { stream } = await streamInference(chat, payload.model, this.env);
+      // Built per run, so newly connected MCP servers are picked up without
+      // a redeploy. An unreachable server is skipped, not fatal.
+      const toolset = await buildToolset(this.env.OMNIGROK_KV, payload.userId).catch(() => undefined);
+      const { stream } = await streamInference(chat, payload.model, this.env, { toolset });
       const reader = stream.getReader();
       const decoder = new TextDecoder();
       let buffer = "";

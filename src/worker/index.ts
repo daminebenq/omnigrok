@@ -15,6 +15,8 @@ import {
   type BaseRecord,
 } from "./resources";
 import { browse } from "./browse";
+import { probeMcpServer } from "./mcp";
+import { buildToolset } from "./tools";
 import { putFile, getFile, deleteFile, availableBackends, type FileEnv } from "./files";
 import {
   listConversations,
@@ -275,8 +277,11 @@ app.post("/api/r/:collection", async (c) => {
 
   // Never let a blank token from the UI wipe a stored secret.
   const merged = { ...(existing ?? {}), ...body, id, name: body.name.trim() } as BaseRecord;
-  if (col === "mcps" && !body.authToken && existing?.authToken) {
-    merged.authToken = existing.authToken;
+  if (col === "mcps") {
+    if (!body.authToken && existing?.authToken) merged.authToken = existing.authToken;
+    if (!body.accessClientSecret && existing?.accessClientSecret) {
+      merged.accessClientSecret = existing.accessClientSecret;
+    }
   }
 
   const saved = await putRecord(c.env.OMNIGROK_KV, c.get("userId"), col, merged);
@@ -288,6 +293,50 @@ app.delete("/api/r/:collection/:id", async (c) => {
   if (!isCollection(col)) return c.json({ error: "Unknown collection" }, 404);
   await deleteRecord(c.env.OMNIGROK_KV, c.get("userId"), col, c.req.param("id"));
   return c.json({ ok: true });
+});
+
+/** Test an MCP server and report the tools it exposes. */
+app.post("/api/mcp/probe", async (c) => {
+  const body = await c.req.json<{
+    id?: string;
+    url?: string;
+    authToken?: string;
+    accessClientId?: string;
+    accessClientSecret?: string;
+  }>().catch(() => null);
+  if (!body?.url) return c.json({ error: "Missing url" }, 400);
+
+  // Editing a saved server sends a blank secret to mean "unchanged", so fall
+  // back to what is already stored rather than probing with no credentials.
+  let auth = {
+    authToken: body.authToken,
+    accessClientId: body.accessClientId,
+    accessClientSecret: body.accessClientSecret,
+  };
+  if (body.id && !auth.authToken && !auth.accessClientSecret) {
+    const stored = await getRecord<BaseRecord>(c.env.OMNIGROK_KV, c.get("userId"), "mcps", body.id);
+    if (stored) {
+      auth = {
+        authToken: stored.authToken as string | undefined,
+        accessClientId: stored.accessClientId as string | undefined,
+        accessClientSecret: stored.accessClientSecret as string | undefined,
+      };
+    }
+  }
+
+  return c.json(await probeMcpServer(body.url, auth));
+});
+
+/** Everything the model can currently call, for the settings UI. */
+app.get("/api/tools", async (c) => {
+  const toolset = await buildToolset(c.env.OMNIGROK_KV, c.get("userId"));
+  return c.json({
+    tools: toolset.schemas.map((t) => ({
+      name: t.function.name,
+      description: t.function.description,
+      source: toolset.mcpRoutes.has(t.function.name) ? "mcp" : "builtin",
+    })),
+  });
 });
 
 // --- Built-in browser -----------------------------------------------------
