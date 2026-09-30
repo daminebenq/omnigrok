@@ -23,7 +23,7 @@ export function WorkingIndicator({ isWorking, logs }: WorkingIndicatorProps) {
   if (!isWorking) return null;
 
   const running = logs?.tools.find((t) => t.status === "running");
-  const hasDetail = Boolean(logs?.reasoning || logs?.usage || logs?.tools.length);
+  const hasDetail = Boolean(logs?.reasoning || logs?.usage || logs?.tools.length || logs?.switchedTo);
 
   return (
     <div
@@ -88,6 +88,16 @@ export function WorkingIndicator({ isWorking, logs }: WorkingIndicatorProps) {
                   </div>
                 ))}
               </dl>
+            </div>
+          )}
+
+          {logs.switchedTo && (
+            <div className="mb-3 flex items-start gap-1.5 text-xs">
+              <Icon name="refresh" size={12} className="text-accent-yellow mt-0.5 shrink-0" />
+              <span className="text-text-tertiary">
+                Switched to <span className="font-mono text-text-secondary">{logs.switchedTo}</span>
+                {logs.switchReason ? ` — ${logs.switchReason}` : ""}
+              </span>
             </div>
           )}
 

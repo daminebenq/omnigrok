@@ -54,6 +54,8 @@ export interface ModelInfo {
   capabilities: Capability[];
   contextLength?: number;
   reputation: number;
+  /** True when a rule actually matched, rather than falling to the default. */
+  known: boolean;
 }
 
 function resolveProvider(model: string, env: InferenceEnv): { url: string; key: string; model: string } | null {
@@ -95,12 +97,14 @@ const REPUTATION_RULES: Array<{ test: RegExp; score: number }> = [
   { test: /llama-?2|-7b|-8b/, score: 55 },
 ];
 
-function scoreReputation(id: string): number {
+const DEFAULT_REPUTATION = 60;
+
+function scoreReputation(id: string): { score: number; known: boolean } {
   const s = id.toLowerCase();
   for (const rule of REPUTATION_RULES) {
-    if (rule.test.test(s)) return rule.score;
+    if (rule.test.test(s)) return { score: rule.score, known: true };
   }
-  return 60;
+  return { score: DEFAULT_REPUTATION, known: false };
 }
 
 const CAPABILITY_HINTS: Array<{ cap: Capability; test: RegExp }> = [
@@ -144,12 +148,14 @@ function toModelInfo(raw: RawModel, fallbackProvider: string): ModelInfo | null 
   if (!id) return null;
   // "anthropic/claude-x" -> group under "anthropic" when the API omits provider.
   const inferred = id.includes("/") ? id.split("/")[0] : fallbackProvider;
+  const { score, known } = scoreReputation(id);
   return {
     id,
     provider: raw.provider ?? raw.owned_by ?? inferred,
     capabilities: deriveCapabilities(id, raw.capabilities),
     contextLength: raw.context_length ?? raw.context_window,
-    reputation: scoreReputation(id),
+    reputation: score,
+    known,
   };
 }
 
@@ -221,6 +227,7 @@ export const AUTO_MODEL: ModelInfo = {
   provider: "OmniGrok",
   capabilities: ["reasoning", "vision", "coding", "tools"],
   reputation: 100,
+  known: true,
 };
 
 export async function getAvailableModels(env: InferenceEnv): Promise<ModelInfo[]> {
@@ -254,12 +261,14 @@ export async function getAvailableModels(env: InferenceEnv): Promise<ModelInfo[]
 // --- Streaming + agent loop ----------------------------------------------
 
 import { BUILTIN_TOOLS, dispatchTool, type ToolEnv, type Toolset } from "./tools";
+import { markCooling, isCooling, parseRateLimit } from "./cooldown";
 
 export type StreamEvent =
   | { type: "token"; content: string }
   | { type: "reasoning"; content: string }
   | { type: "tool"; id: string; name: string; status: "running" | "done" | "error"; detail?: string }
-  | { type: "usage"; input: number; output: number; total: number };
+  | { type: "usage"; input: number; output: number; total: number }
+  | { type: "model"; model: string; reason?: string };
 
 export interface ChatMessage {
   role: string;
@@ -341,15 +350,24 @@ const MAX_TOOL_TURNS = 5;
  */
 async function* runAgent(
   initialMessages: ChatMessage[],
-  model: string,
+  candidates: string[],
   env: InferenceEnv,
   enableTools: boolean,
-  toolset?: Toolset
+  toolset?: Toolset,
+  kv?: KVNamespace
 ): AsyncGenerator<StreamEvent, { text: string; reasoning: string }> {
   const toolSchemas = toolset?.schemas ?? BUILTIN_TOOLS;
-  const resolved = resolveProvider(model, env);
+
+  // Skip anything already known to be cooling; keep one entry so a fully
+  // cooled-down list still attempts something rather than failing blind.
+  const warm = candidates.filter((m) => !isCooling(m));
+  const queue = warm.length ? warm : candidates.slice(0, 1);
+
+  let attempt = 0;
+  let model = queue[0];
+  let resolved = resolveProvider(model, env);
   if (!resolved) throw new Error(`No provider configured for model: ${model}`);
-  const { url, key, model: providerModel } = resolved;
+  let { url, key, model: providerModel } = resolved;
 
   const convo: ChatMessage[] = [...initialMessages];
   const promptChars = convo.reduce((n, m) => n + (m.content?.length ?? 0), 0);
@@ -370,6 +388,35 @@ async function* runAgent(
     }
     if (!res.ok || !res.body) {
       const detail = await res.text().catch(() => "");
+      const limit = parseRateLimit(res.status, detail, res.headers.get("retry-after"));
+
+      if (limit.isRateLimit) {
+        // Park the model that is actually cooling, which the gateway may name
+        // explicitly, and move to the next candidate rather than failing.
+        if (kv) {
+          await markCooling(kv, limit.model ?? model, limit.resetSeconds, limit.message);
+        }
+        const next = queue.slice(attempt + 1).find((m) => !isCooling(m));
+        if (next) {
+          attempt = queue.indexOf(next);
+          model = next;
+          const r = resolveProvider(model, env);
+          if (r) {
+            ({ url, key, model: providerModel } = r);
+            yield {
+              type: "model",
+              model,
+              reason: `previous model rate limited (retry in ${limit.resetSeconds}s)`,
+            };
+            turn -= 1; // this attempt did not consume a tool turn
+            continue;
+          }
+        }
+        throw new Error(
+          `All candidate models are rate limited. ${limit.message} Retry in ${limit.resetSeconds}s.`
+        );
+      }
+
       throw new Error(`Provider API error ${res.status}: ${detail.slice(0, 300)}`);
     }
 
@@ -484,7 +531,7 @@ export async function streamInference(
   messages: ChatMessage[],
   model: string,
   env: InferenceEnv,
-  opts: { tools?: boolean; toolset?: Toolset } = {}
+  opts: { tools?: boolean; toolset?: Toolset; fallbacks?: string[]; kv?: KVNamespace } = {}
 ): Promise<StreamResult> {
   // Resolve eagerly so a misconfigured model fails as an HTTP error rather
   // than as a dead stream the client cannot interpret.
@@ -492,8 +539,10 @@ export async function streamInference(
     throw new Error(`No provider configured for model: ${model}`);
   }
 
+  const candidates = [model, ...(opts.fallbacks ?? []).filter((m) => m !== model)];
+
   const encoder = new TextEncoder();
-  const agent = runAgent(messages, model, env, opts.tools !== false, opts.toolset);
+  const agent = runAgent(messages, candidates, env, opts.tools !== false, opts.toolset, opts.kv);
 
   let resolveCompletion!: (v: { text: string; reasoning: string }) => void;
   const completion = new Promise<{ text: string; reasoning: string }>((res) => {

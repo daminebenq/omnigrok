@@ -30,6 +30,7 @@ interface StartPayload {
   /** Present when the router chose the model rather than the user. */
   task?: string;
   routed?: boolean;
+  fallbacks?: string[];
 }
 
 const CHECKPOINT_EVERY = 25;
@@ -48,6 +49,8 @@ export class ChatSession implements DurableObject {
   private startedAt = 0;
   private toolCalls = 0;
   private usage: { input: number; output: number; total: number } | null = null;
+  /** Set when a rate limit pushed the turn onto a different model. */
+  private actualModel: string | null = null;
 
   constructor(
     private state: DurableObjectState,
@@ -189,7 +192,11 @@ export class ChatSession implements DurableObject {
       // Built per run, so newly connected MCP servers are picked up without
       // a redeploy. An unreachable server is skipped, not fatal.
       const toolset = await buildToolset(this.env.OMNIGROK_KV, payload.userId).catch(() => undefined);
-      const { stream } = await streamInference(chat, payload.model, this.env, { toolset });
+      const { stream } = await streamInference(chat, payload.model, this.env, {
+        toolset,
+        fallbacks: payload.fallbacks,
+        kv: this.env.OMNIGROK_KV,
+      });
       const reader = stream.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -216,6 +223,7 @@ export class ChatSession implements DurableObject {
           if (evt.type === "token") this.text += evt.content;
           if (evt.type === "reasoning") this.reasoning += evt.content;
           if (evt.type === "tool" && evt.status === "running") this.toolCalls += 1;
+          if (evt.type === "model") this.actualModel = evt.model;
           if (evt.type === "usage") {
             this.usage = { input: evt.input, output: evt.output, total: evt.total };
           }
@@ -273,10 +281,11 @@ export class ChatSession implements DurableObject {
       if (this.failed) conv.lastError = this.failed;
       await saveConversation(this.env.OMNIGROK_KV, payload.userId, conv);
 
+      const usedModel = this.actualModel ?? payload.model;
       await recordUsage(this.env.OMNIGROK_KV, payload.userId, {
         at: Date.now(),
-        model: payload.model,
-        provider: payload.model.includes("/") ? payload.model.split("/")[0] : "omniroute",
+        model: usedModel,
+        provider: usedModel.includes("/") ? usedModel.split("/")[0] : "omniroute",
         task: payload.task,
         routed: Boolean(payload.routed),
         inputTokens: this.usage?.input ?? 0,

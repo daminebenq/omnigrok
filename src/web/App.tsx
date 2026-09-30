@@ -15,6 +15,9 @@ export interface LiveLogs {
   usage?: TokenUsage;
   tools: ToolEvent[];
   startedAt: number;
+  /** Populated when a rate limit rerouted the turn to another model. */
+  switchedTo?: string;
+  switchReason?: string;
 }
 
 function newConv(model: string): Conversation {
@@ -76,6 +79,13 @@ export default function App() {
           seqRef.current = seq + 1;
         },
         onToken: (chunk) => patchMsg((m) => ({ ...m, content: m.content + chunk })),
+        onModel: (evt) =>
+          setLogsByConv((prev) => {
+            const cur = prev[convId];
+            return cur
+              ? { ...prev, [convId]: { ...cur, switchedTo: evt.model, switchReason: evt.reason } }
+              : prev;
+          }),
         onReasoning: (chunk) => {
           setLogsByConv((prev) => {
             const cur = prev[convId];

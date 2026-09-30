@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { validateCfAccessToken } from "./auth";
 import { getAvailableModels } from "./inference";
-import { route } from "./router";
+import { route, classify, buildFallbacks } from "./router";
+import { loadCooldowns, isCooling, coolingModels } from "./cooldown";
 import { summarizeUsage } from "./usage";
 import { getInventory, type CfEnv } from "./cfresources";
 export { ChatSession } from "./session";
@@ -181,19 +182,40 @@ app.post("/api/chat", async (c) => {
   }
   if (!conversationId) return c.json({ error: "Missing conversationId" }, 400);
 
-  // "auto" means: pick the right model for this particular request.
+  // Fallbacks are built for every request, not just auto-routed ones: a model
+  // the user picked by hand can be rate limited too, and the turn should move
+  // on rather than surfacing a 429.
+  await loadCooldowns(c.env.OMNIGROK_KV);
+  const catalog = await getAvailableModels(c.env);
+
   let task: string | undefined;
   let routed = false;
+
   if (model === "auto") {
-    const catalog = await getAvailableModels(c.env);
-    const decision = route(catalog, messages);
+    const decision = route(catalog, messages, { exclude: isCooling });
     if (!decision.model) {
       return c.json({ error: "Auto routing found no available model" }, 503);
     }
     model = decision.model;
     task = decision.task;
     routed = true;
+  } else if (isCooling(model)) {
+    // The chosen model is cooling down; start on a stand-in instead of
+    // spending the request on a guaranteed 429.
+    const { task: kind } = classify(messages);
+    const [standIn] = buildFallbacks(catalog, model, kind, 1);
+    if (standIn) {
+      model = standIn;
+      task = kind;
+      routed = true;
+    }
   }
+
+  const fallbacks = buildFallbacks(
+    catalog,
+    model,
+    (task as any) ?? classify(messages).task
+  ).filter((m) => !isCooling(m));
 
   // Record the question and mark the thread as running before handing off, so
   // another device that loads mid-run knows to attach.
@@ -217,7 +239,7 @@ app.post("/api/chat", async (c) => {
   return sessionStub(c, conversationId).fetch(
     new Request("https://session/start", {
       method: "POST",
-      body: JSON.stringify({ userId, conversationId, messages, model, title: conv.title, task, routed }),
+      body: JSON.stringify({ userId, conversationId, messages, model, title: conv.title, task, routed, fallbacks }),
     })
   );
 });
@@ -242,6 +264,11 @@ app.post("/api/chat/cancel", async (c) => {
   const { conversationId } = await c.req.json<{ conversationId?: string }>().catch(() => ({ conversationId: undefined }));
   if (!conversationId) return c.json({ error: "Missing conversationId" }, 400);
   return sessionStub(c, conversationId).fetch(new Request("https://session/cancel", { method: "POST" }));
+});
+
+app.get("/api/cooldowns", async (c) => {
+  await loadCooldowns(c.env.OMNIGROK_KV);
+  return c.json({ cooling: coolingModels() });
 });
 
 app.get("/api/usage", async (c) => {

@@ -91,8 +91,15 @@ export const api = {
     af<{ ok: boolean }>("/api/settings", { method: "POST", body: JSON.stringify(s) }),
 };
 
+export interface ModelSwitch {
+  model: string;
+  reason?: string;
+}
+
 export interface StreamHandlers {
   onToken: (chunk: string) => void;
+  /** Fired when a rate limit moved the turn onto a different model. */
+  onModel?: (evt: ModelSwitch) => void;
   onReasoning?: (chunk: string) => void;
   onUsage?: (usage: TokenUsage) => void;
   onTool?: (evt: ToolEvent) => void;
@@ -152,6 +159,8 @@ async function consume(res: Response, h: StreamHandlers): Promise<void> {
             status?: ToolEvent["status"];
             detail?: string;
             message?: string;
+            model?: string;
+            reason?: string;
           };
           if (typeof evt.seq === "number") h.onSeq?.(evt.seq);
 
@@ -161,6 +170,8 @@ async function consume(res: Response, h: StreamHandlers): Promise<void> {
             h.onUsage?.({ input: evt.input ?? 0, output: evt.output ?? 0, total: evt.total ?? 0 });
           } else if (evt.type === "tool" && evt.id && evt.name && evt.status) {
             h.onTool?.({ id: evt.id, name: evt.name, status: evt.status, detail: evt.detail });
+          } else if (evt.type === "model" && evt.model) {
+            h.onModel?.({ model: evt.model, reason: evt.reason });
           } else if (evt.type === "error") {
             streamError = evt.message ?? "Inference failed";
           }

@@ -13,10 +13,10 @@ const check = (name, got, want) => {
 const user = (content) => [{ role: "user", content }];
 
 const CATALOG = [
-  { id: "anthropic/claude-opus-4-6",  provider: "anthropic", capabilities: ["reasoning","vision","coding","tools"], contextLength: 200000, reputation: 99 },
-  { id: "deepseek/deepseek-r1",       provider: "deepseek",  capabilities: ["reasoning","coding"],                   contextLength: 64000,  reputation: 92 },
-  { id: "openai/gpt-4o",              provider: "openai",    capabilities: ["vision","tools"],                       contextLength: 128000, reputation: 89 },
-  { id: "groq/llama-3.1-8b-instant",  provider: "groq",      capabilities: [],                                       contextLength: 8192,   reputation: 55 },
+  { id: "anthropic/claude-opus-4-6",  provider: "anthropic", capabilities: ["reasoning","vision","coding","tools"], contextLength: 200000, reputation: 99, known: true },
+  { id: "deepseek/deepseek-r1",       provider: "deepseek",  capabilities: ["reasoning","coding"],                   contextLength: 64000,  reputation: 92, known: true },
+  { id: "openai/gpt-4o",              provider: "openai",    capabilities: ["vision","tools"],                       contextLength: 128000, reputation: 89, known: true },
+  { id: "groq/llama-3.1-8b-instant",  provider: "groq",      capabilities: [],                                       contextLength: 8192,   reputation: 55, known: true },
 ];
 
 // --- classification ---
@@ -41,15 +41,15 @@ check("long-context needs a big window", selectModel(CATALOG, "long-context").mo
 
 // vision must not pick a model that cannot see
 const noVisionTop = [
-  { id: "x/reasoner", provider: "x", capabilities: ["reasoning"], contextLength: 8000, reputation: 99 },
-  { id: "y/seer",     provider: "y", capabilities: ["vision"],    contextLength: 8000, reputation: 70 },
+  { id: "x/reasoner", provider: "x", capabilities: ["reasoning"], contextLength: 8000, reputation: 99, known: true },
+  { id: "y/seer",     provider: "y", capabilities: ["vision"],    contextLength: 8000, reputation: 70, known: true },
 ];
 check("vision skips a higher-ranked blind model", selectModel(noVisionTop, "vision").model, "y/seer");
 
 // long-context must not pick a small window even if it ranks higher
 const smallTop = [
-  { id: "a/small", provider: "a", capabilities: ["reasoning"], contextLength: 8000,   reputation: 99 },
-  { id: "b/roomy", provider: "b", capabilities: [],            contextLength: 200000, reputation: 70 },
+  { id: "a/small", provider: "a", capabilities: ["reasoning"], contextLength: 8000,   reputation: 99, known: true },
+  { id: "b/roomy", provider: "b", capabilities: [],            contextLength: 200000, reputation: 70, known: true },
 ];
 check("long-context skips a small window", selectModel(smallTop, "long-context").model, "b/roomy");
 
