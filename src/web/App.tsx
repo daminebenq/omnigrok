@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Sidebar } from "./components/Sidebar";
-import { ChatArea } from "./components/ChatArea";
+import { Dashboard } from "./components/Dashboard";
 import { api, streamChat } from "./lib/api";
 import type { Conversation, Message, ModelInfo } from "./lib/api";
 
@@ -17,130 +16,103 @@ function newConv(model: string): Conversation {
 
 export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeConvId, setActiveConvId] = useState<string>("");
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
 
-  const activeConv = conversations.find((c) => c.id === activeId) ?? null;
-  const defaultModel = models[0]?.id ?? "antigravity/claude-sonnet-4-6";
+  const activeConv = conversations.find((c) => c.id === activeConvId);
 
+  // Load models on mount
   useEffect(() => {
-    api.models().then((r) => setModels(r.models)).catch(() => {});
-    api.conversations().then((r) => {
-      setConversations(r.conversations);
-      if (r.conversations.length > 0) setActiveId(r.conversations[0].id);
-    }).catch(() => {});
+    api.getModels().then(setModels);
   }, []);
 
-  // Keyboard shortcuts
+  // Auto-create first conversation when models load
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-        e.preventDefault();
-        handleNewChat();
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  });
-
-  const handleNewChat = useCallback(() => {
-    const conv = newConv(activeConv?.model ?? defaultModel);
-    setConversations((prev) => [conv, ...prev]);
-    setActiveId(conv.id);
-  }, [activeConv?.model, defaultModel]);
-
-  const handleSelectConv = (id: string) => setActiveId(id);
-
-  const handleDeleteConv = async (id: string) => {
-    await api.deleteConversation(id).catch(() => {});
-    setConversations((prev) => prev.filter((c) => c.id !== id));
-    if (activeId === id) {
-      const remaining = conversations.filter((c) => c.id !== id);
-      setActiveId(remaining[0]?.id ?? null);
+    if (models.length && !conversations.length) {
+      const first = newConv(models[0].id);
+      setConversations([first]);
+      setActiveConvId(first.id);
     }
-  };
+  }, [models, conversations]);
 
-  const handleModelChange = (model: string) => {
+  // Model change handler
+  const handleModelChange = useCallback((model: string) => {
     if (!activeConv) return;
-    setConversations((prev) =>
-      prev.map((c) => (c.id === activeConv.id ? { ...c, model } : c))
+    
+    setConversations(prev => 
+      prev.map(c => 
+        c.id === activeConv.id 
+          ? { ...c, model, updatedAt: Date.now() }
+          : c
+      )
     );
-  };
+  }, [activeConv]);
 
-  const handleSend = async (content: string) => {
-    if (!content.trim() || streaming) return;
-
-    let conv = activeConv;
-    if (!conv) {
-      conv = newConv(defaultModel);
-      setConversations((prev) => [conv!, ...prev]);
-      setActiveId(conv.id);
-    }
+  // Send message handler
+  const handleSend = useCallback(async (content: string) => {
+    if (!activeConv || streaming) return;
 
     const userMsg: Message = {
       id: crypto.randomUUID(),
       role: "user",
       content,
-      createdAt: Date.now(),
+      timestamp: Date.now(),
     };
 
     const assistantMsg: Message = {
       id: crypto.randomUUID(),
-      role: "assistant",
+      role: "assistant", 
       content: "",
-      createdAt: Date.now(),
+      timestamp: Date.now(),
     };
 
-    const updatedConv: Conversation = {
-      ...conv,
-      messages: [...conv.messages, userMsg, assistantMsg],
-      title: conv.messages.length === 0 ? content.slice(0, 60) : conv.title,
-      updatedAt: Date.now(),
-    };
-
-    setConversations((prev) =>
-      prev.map((c) => (c.id === updatedConv.id ? updatedConv : c))
+    // Add messages immediately
+    setConversations(prev =>
+      prev.map(c =>
+        c.id === activeConv.id
+          ? { ...c, messages: [...c.messages, userMsg, assistantMsg], updatedAt: Date.now() }
+          : c
+      )
     );
 
     setStreaming(true);
-    try {
-      const allMessages = [...conv.messages, userMsg].map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
 
-      let accumulated = "";
-      for await (const chunk of streamChat(conv.model, allMessages, conv.id)) {
-        accumulated += chunk;
-        const finalAcc = accumulated;
-        setConversations((prev) =>
-          prev.map((c) =>
-            c.id === updatedConv.id
-              ? {
-                  ...c,
-                  messages: c.messages.map((m) =>
-                    m.id === assistantMsg.id ? { ...m, content: finalAcc } : m
-                  ),
-                }
-              : c
-          )
-        );
-      }
+    try {
+      await streamChat({
+        messages: [...activeConv.messages, userMsg],
+        model: activeConv.model,
+        onChunk: (chunk) => {
+          setConversations(prev =>
+            prev.map(c =>
+              c.id === activeConv.id
+                ? {
+                    ...c,
+                    messages: c.messages.map(m =>
+                      m.id === assistantMsg.id
+                        ? { ...m, content: m.content + chunk }
+                        : m
+                    ),
+                    updatedAt: Date.now(),
+                  }
+                : c
+            )
+          );
+        },
+      });
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : "Stream failed";
-      setConversations((prev) =>
-        prev.map((c) =>
-          c.id === updatedConv.id
+      setConversations(prev =>
+        prev.map(c =>
+          c.id === activeConv.id
             ? {
                 ...c,
-                messages: c.messages.map((m) =>
+                messages: c.messages.map(m =>
                   m.id === assistantMsg.id
                     ? { ...m, content: `Error: ${errMsg}` }
                     : m
                 ),
+                updatedAt: Date.now(),
               }
             : c
         )
@@ -148,38 +120,24 @@ export default function App() {
     } finally {
       setStreaming(false);
     }
-  };
+  }, [activeConv, streaming]);
+
+  if (!activeConv) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-gray-50 dark:bg-gray-900">
+        <div className="text-gray-600 dark:text-gray-400">Loading...</div>
+      </div>
+    );
+  }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-bg-primary">
-      {/* Mobile sidebar overlay */}
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 z-20 bg-black/50 lg:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      <Sidebar
-        open={sidebarOpen}
-        conversations={conversations}
-        activeId={activeId}
-        onSelect={handleSelectConv}
-        onDelete={handleDeleteConv}
-        onNewChat={handleNewChat}
-        models={models}
-        currentModel={activeConv?.model ?? defaultModel}
-        onModelChange={handleModelChange}
-        onClose={() => setSidebarOpen(false)}
-      />
-
-      <ChatArea
-        conversation={activeConv}
-        streaming={streaming}
-        onSend={handleSend}
-        onToggleSidebar={() => setSidebarOpen((v) => !v)}
-        sidebarOpen={sidebarOpen}
-      />
-    </div>
+    <Dashboard
+      models={models}
+      currentModel={activeConv.model}
+      onModelChange={handleModelChange}
+      messages={activeConv.messages}
+      onSendMessage={handleSend}
+      isLoading={streaming}
+    />
   );
 }
