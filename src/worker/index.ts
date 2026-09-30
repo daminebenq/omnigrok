@@ -52,6 +52,11 @@ interface Bindings {
   BYTEZ_KEY?: string;
   JARVIS_TOKEN?: string;
   FILES_R2?: R2Bucket;
+  R2_ENDPOINT?: string;
+  R2_REGION?: string;
+  R2_BUCKET?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
   MINIO_ENDPOINT?: string;
   MINIO_REGION?: string;
   MINIO_BUCKET?: string;

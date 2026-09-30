@@ -10,6 +10,13 @@
 
 export interface FileEnv {
   FILES_R2?: R2Bucket;
+  // R2 reached over its S3 API. Used when the bucket lives on a different
+  // account than the Worker, where a native binding is not possible.
+  R2_ENDPOINT?: string;
+  R2_REGION?: string;
+  R2_BUCKET?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
   MINIO_ENDPOINT?: string;
   MINIO_REGION?: string;
   MINIO_BUCKET?: string;
@@ -47,6 +54,17 @@ interface S3Config {
 
 function s3Configs(env: FileEnv): S3Config[] {
   const candidates: Array<S3Config | null> = [
+    // R2 first: zero egress, and it is the cheapest read path here.
+    env.R2_ENDPOINT && env.R2_BUCKET && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY
+      ? {
+          label: "r2",
+          endpoint: env.R2_ENDPOINT,
+          region: env.R2_REGION ?? "auto",
+          bucket: env.R2_BUCKET,
+          accessKeyId: env.R2_ACCESS_KEY_ID,
+          secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+        }
+      : null,
     env.MINIO_ENDPOINT && env.MINIO_BUCKET && env.MINIO_ACCESS_KEY_ID && env.MINIO_SECRET_ACCESS_KEY
       ? {
           label: "minio",
