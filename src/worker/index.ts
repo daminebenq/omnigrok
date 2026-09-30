@@ -92,31 +92,71 @@ app.post("/api/settings", async (c) => {
 app.post("/api/chat", async (c) => {
   try {
     const userId = (c as any).get("userId");
-    const { messages, model } = await c.req.json();
+    const body = await c.req.json();
+    const messages = body.messages;
+    const model = body.model;
+    let conversationId = body.conversationId as string | undefined;
 
     if (!messages || !model) {
       return c.json({ error: "Missing messages or model" }, 400);
     }
 
-    // Save conversation before streaming
-    const conversationId = generateUUID();
+    // Reuse existing conversation if the client supplied an id, else create one
+    if (!conversationId) {
+      conversationId = generateUUID();
+    }
+    const existing = await getConversation(c.env.OMNIGROK_KV, userId, conversationId).catch(() => null);
+    const createdAt = existing?.createdAt || Date.now();
+
+    // Persist the user turn immediately so a reload never loses the question
     await saveConversation(c.env.OMNIGROK_KV, userId, {
       id: conversationId,
-      title: messages[0]?.content?.slice(0, 50) + "..." || "New Chat",
+      title: existing?.title || messages[0]?.content?.slice(0, 50) || "New Chat",
       model,
       messages,
-      createdAt: Date.now(),
+      createdAt,
       updatedAt: Date.now(),
     });
 
     // Start streaming inference
     const stream = await streamInference(messages, model, c.env as any);
 
-    return new Response(stream, {
+    // Tee the stream: one branch to the client, one to accumulate the reply
+    const [clientStream, saveStream] = stream.tee();
+
+    // Background task: read the full assistant reply and persist it
+    const persist = (async () => {
+      try {
+        const reader = saveStream.getReader();
+        const decoder = new TextDecoder();
+        let assistant = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          assistant += decoder.decode(value, { stream: true });
+        }
+        await saveConversation(c.env.OMNIGROK_KV, userId, {
+          id: conversationId!,
+          title: existing?.title || messages[0]?.content?.slice(0, 50) || "New Chat",
+          model,
+          messages: [...messages, { role: "assistant", content: assistant }],
+          createdAt,
+          updatedAt: Date.now(),
+        });
+      } catch (err) {
+        console.error("Failed to persist assistant reply:", err);
+      }
+    })();
+    if ((c as any).executionCtx?.waitUntil) {
+      (c as any).executionCtx.waitUntil(persist);
+    }
+
+    return new Response(clientStream, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
+        "X-Conversation-Id": conversationId,
       },
     });
   } catch (error) {
@@ -125,7 +165,6 @@ app.post("/api/chat", async (c) => {
   }
 });
 
-// Fallback to static assets
 app.get("*", async (c) => {
   const response = await c.env.ASSETS.fetch(c.req.raw);
   return response;

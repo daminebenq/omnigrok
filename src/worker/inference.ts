@@ -41,7 +41,7 @@ function resolveProvider(model: string, env: InferenceEnv): { url: string; key: 
 
   // OmniRoute fallback
   if (env.OMNIROUTE_KEY) {
-    return { url: "https://api.omniroute.tech/v1/chat/completions", key: env.OMNIROUTE_KEY, model };
+    return { url: "https://omniroute.damineweb.work/v1/chat/completions", key: env.OMNIROUTE_KEY, model };
   }
 
   return null;
@@ -58,7 +58,7 @@ interface OmniRouteModel {
 // Fetch full model catalog from OmniRoute API
 async function fetchOmniRouteModels(apiKey: string): Promise<Array<{ id: string; provider: string }>> {
   try {
-    const response = await fetch("https://api.omniroute.tech/v1/models", {
+    const response = await fetch("https://omniroute.damineweb.work/v1/models", {
       headers: {
         "Authorization": `Bearer ${apiKey}`,
         "Content-Type": "application/json"
