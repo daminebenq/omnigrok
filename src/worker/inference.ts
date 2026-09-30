@@ -38,67 +38,70 @@ function resolveProvider(model: string, env: InferenceEnv): { url: string; key: 
       return { url: p.url, key, model: model.slice(p.prefix.length + 1) };
     }
   }
-  // fallback: OmniRoute
-  if (!env.OMNIROUTE_KEY) return null;
-  return {
-    url: "https://omniroute.damineweb.work/v1/chat/completions",
-    key: env.OMNIROUTE_KEY,
-    model,
-  };
-}
 
-export async function streamInference(
-  model: string,
-  messages: Array<{ role: string; content: string }>,
-  tools: unknown[],
-  env: InferenceEnv
-): Promise<Response> {
-  const route = resolveProvider(model, env);
-  if (!route) {
-    return new Response("No provider configured for this model", { status: 503 });
+  // OmniRoute fallback
+  if (env.OMNIROUTE_KEY) {
+    return { url: "https://api.omniroute.tech/v1/chat/completions", key: env.OMNIROUTE_KEY, model };
   }
 
-  const body = JSON.stringify({
-    model: route.model,
-    messages,
-    stream: true,
-    tools: tools.length > 0 ? tools : undefined,
-  });
-
-  const upstream = await fetch(route.url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${route.key}`,
-    },
-    body,
-  });
-
-  if (!upstream.ok) {
-    const err = await upstream.text();
-    return new Response(err, { status: upstream.status });
-  }
-
-  return new Response(upstream.body, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "X-Accel-Buffering": "no",
-    },
-  });
+  return null;
 }
 
-export function getAvailableModels(env: InferenceEnv): Array<{ id: string; provider: string }> {
+interface OmniRouteModel {
+  id: string;
+  provider: string;
+  capabilities?: string[];
+  context_length?: number;
+  description?: string;
+}
+
+// Fetch full model catalog from OmniRoute API
+async function fetchOmniRouteModels(apiKey: string): Promise<Array<{ id: string; provider: string }>> {
+  try {
+    const response = await fetch("https://api.omniroute.tech/v1/models", {
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      console.warn(`OmniRoute API error: ${response.status}`);
+      return [];
+    }
+
+    const data = await response.json();
+    const models = data.data || data.models || [];
+    
+    return models.map((model: OmniRouteModel) => ({
+      id: model.id,
+      provider: model.provider || "OmniRoute"
+    }));
+  } catch (error) {
+    console.warn("Failed to fetch OmniRoute models:", error);
+    return [];
+  }
+}
+
+export async function getAvailableModels(env: InferenceEnv): Promise<Array<{ id: string; provider: string }>> {
   const models: Array<{ id: string; provider: string }> = [];
 
+  // Fetch full OmniRoute catalog if API key is available
   if (env.OMNIROUTE_KEY) {
-    models.push(
-      { id: "antigravity/claude-sonnet-4-6", provider: "OmniRoute" },
-      { id: "agy/claude-sonnet-4-6", provider: "OmniRoute" },
-      { id: "no-think/agy/claude-sonnet-4-6", provider: "OmniRoute" },
-      { id: "claude-sonnet-failover", provider: "OmniRoute" }
-    );
+    const omniRouteModels = await fetchOmniRouteModels(env.OMNIROUTE_KEY);
+    models.push(...omniRouteModels);
+    
+    // Fallback to hardcoded list if API call fails
+    if (omniRouteModels.length === 0) {
+      models.push(
+        { id: "antigravity/claude-sonnet-4-6", provider: "OmniRoute" },
+        { id: "agy/claude-sonnet-4-6", provider: "OmniRoute" },
+        { id: "no-think/agy/claude-sonnet-4-6", provider: "OmniRoute" },
+        { id: "claude-sonnet-failover", provider: "OmniRoute" }
+      );
+    }
   }
+
   if (env.GROQ_KEY) {
     models.push(
       { id: "groq/llama-3.1-70b-versatile", provider: "Groq" },
@@ -106,27 +109,54 @@ export function getAvailableModels(env: InferenceEnv): Array<{ id: string; provi
       { id: "groq/mixtral-8x7b-32768", provider: "Groq" }
     );
   }
+
   if (env.OPENAI_KEY) {
     models.push(
       { id: "openai/gpt-4o", provider: "OpenAI" },
       { id: "openai/gpt-4o-mini", provider: "OpenAI" },
-      { id: "openai/o1-preview", provider: "OpenAI" }
+      { id: "openai/gpt-4-turbo", provider: "OpenAI" },
+      { id: "openai/gpt-3.5-turbo", provider: "OpenAI" }
     );
   }
+
   if (env.GEMINI_KEY) {
     models.push(
       { id: "gemini/gemini-1.5-pro", provider: "Google" },
       { id: "gemini/gemini-1.5-flash", provider: "Google" }
     );
   }
-  if (env.NVIDIA_KEY) {
-    models.push({ id: "nvidia/meta/llama-3.1-70b-instruct", provider: "NVIDIA NIM" });
-  }
-  if (env.TOGETHER_KEY) {
-    models.push({ id: "together/meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo", provider: "Together AI" });
-  }
-  if (env.HF_KEY) {
-    models.push({ id: "hf/meta-llama/Meta-Llama-3.1-8B-Instruct", provider: "Hugging Face" });
-  }
+
   return models;
+}
+
+export async function streamInference(
+  messages: Array<{ role: string; content: string }>,
+  model: string,
+  env: InferenceEnv
+): Promise<ReadableStream> {
+  const resolved = resolveProvider(model, env);
+  if (!resolved) throw new Error(`No provider configured for model: ${model}`);
+
+  const { url, key, model: providerModel } = resolved;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${key}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: providerModel,
+      messages,
+      stream: true,
+      max_tokens: 4096,
+      temperature: 0.7,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Provider API error: ${response.status} ${response.statusText}`);
+  }
+
+  return response.body!;
 }

@@ -37,10 +37,15 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
-// Models endpoint
-app.get("/api/models", (c) => {
-  const models = getAvailableModels(c.env as any);
-  return c.json({ models });
+// Models endpoint - now async to fetch full OmniRoute catalog
+app.get("/api/models", async (c) => {
+  try {
+    const models = await getAvailableModels(c.env as any);
+    return c.json({ models });
+  } catch (error) {
+    console.error("Error fetching models:", error);
+    return c.json({ error: "Failed to fetch models" }, 500);
+  }
 });
 
 // Conversations
@@ -52,48 +57,17 @@ app.get("/api/conversations", async (c) => {
 
 app.get("/api/conversations/:id", async (c) => {
   const userId = (c as any).get("userId");
-  const conv = await getConversation(c.env.OMNIGROK_KV, userId, c.req.param("id"));
+  const id = c.req.param("id");
+  const conv = await getConversation(c.env.OMNIGROK_KV, userId, id);
   if (!conv) return c.json({ error: "Not found" }, 404);
   return c.json(conv);
 });
 
 app.delete("/api/conversations/:id", async (c) => {
   const userId = (c as any).get("userId");
-  await deleteConversation(c.env.OMNIGROK_KV, userId, c.req.param("id"));
+  const id = c.req.param("id");
+  await deleteConversation(c.env.OMNIGROK_KV, userId, id);
   return c.json({ ok: true });
-});
-
-// Inference streaming
-app.post("/api/chat", async (c) => {
-  const userId = (c as any).get("userId");
-  const { model, messages, conversationId, title } = await c.req.json<{
-    model: string;
-    messages: Array<{ role: string; content: string }>;
-    conversationId?: string;
-    title?: string;
-  }>();
-
-  // Save/update conversation
-  const convId = conversationId ?? crypto.randomUUID();
-  const existing = conversationId ? await getConversation(c.env.OMNIGROK_KV, userId, convId) : null;
-  const conv = existing ?? {
-    id: convId,
-    title: title ?? messages[0]?.content?.slice(0, 60) ?? "New Chat",
-    model,
-    messages: [],
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  };
-
-  // Add user messages
-  const newMessages = messages.filter((m) => !conv.messages.find((e: any) => e.content === m.content && e.role === m.role));
-  conv.messages.push(...newMessages.map((m) => ({ id: crypto.randomUUID(), ...m, createdAt: Date.now() })));
-  conv.updatedAt = Date.now();
-  await saveConversation(c.env.OMNIGROK_KV, userId, conv as any);
-
-  // Proxy stream to provider
-  const streamRes = await streamInference(model, messages, BUILTIN_TOOLS, c.env as any);
-  return streamRes;
 });
 
 // Settings
@@ -110,7 +84,47 @@ app.post("/api/settings", async (c) => {
   return c.json({ ok: true });
 });
 
-// Static assets fallback
-app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
+// Chat endpoint with streaming
+app.post("/api/chat", async (c) => {
+  try {
+    const userId = (c as any).get("userId");
+    const { messages, model } = await c.req.json();
+
+    if (!messages || !model) {
+      return c.json({ error: "Missing messages or model" }, 400);
+    }
+
+    // Save conversation before streaming
+    const conversationId = randomUUID();
+    await saveConversation(c.env.OMNIGROK_KV, userId, {
+      id: conversationId,
+      title: messages[0]?.content?.slice(0, 50) + "..." || "New Chat",
+      model,
+      messages,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    // Start streaming inference
+    const stream = await streamInference(messages, model, c.env as any);
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+      },
+    });
+  } catch (error) {
+    console.error("Chat error:", error);
+    return c.json({ error: "Chat failed" }, 500);
+  }
+});
+
+// Fallback to static assets
+app.get("*", async (c) => {
+  const response = await c.env.ASSETS.fetch(c.req.raw);
+  return response;
+});
 
 export default app;
