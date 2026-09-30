@@ -225,6 +225,20 @@ const server = createServer(async (req, res) => {
   }
 });
 
+// A bind failure must be loud. Under launchd/systemd with KeepAlive a silent
+// crash just restarts forever and the agent looks installed but is not there.
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(
+      `Port ${PORT} on 127.0.0.1 is already in use by another process. ` +
+        `Set OMNIGROK_HOST_PORT to a free port and reinstall.`
+    );
+  } else {
+    console.error(`Failed to listen on 127.0.0.1:${PORT}: ${err.message}`);
+  }
+  process.exit(1);
+});
+
 // Loopback only. cloudflared dials out to reach this; nothing dials in.
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`omnigrok-host "${NAME}" on 127.0.0.1:${PORT}`);

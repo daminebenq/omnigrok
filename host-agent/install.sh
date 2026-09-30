@@ -25,6 +25,23 @@ done
 
 command -v node >/dev/null 2>&1 || { echo "node is required" >&2; exit 1; }
 
+# Find a free loopback port rather than colliding with whatever already runs
+# on the default. A silent bind failure under KeepAlive looks like a working
+# install that is simply not there.
+port_busy() {
+  node -e "
+const net=require('net');const s=net.createServer();
+s.once('error',()=>process.exit(0));
+s.once('listening',()=>s.close(()=>process.exit(1)));
+s.listen($1,'127.0.0.1');" 2>/dev/null
+}
+ORIGINAL_PORT="$PORT"
+while port_busy "$PORT"; do
+  PORT=$((PORT + 1))
+  [ "$PORT" -gt $((ORIGINAL_PORT + 40)) ] && { echo "no free port near $ORIGINAL_PORT" >&2; exit 1; }
+done
+[ "$PORT" != "$ORIGINAL_PORT" ] && echo "port $ORIGINAL_PORT is taken, using $PORT instead"
+
 mkdir -p "$AGENT_DIR"
 cp "$(dirname "$0")/omnigrok-host.mjs" "$AGENT_DIR/omnigrok-host.mjs"
 
