@@ -22,7 +22,8 @@ export function WorkingIndicator({ isWorking, logs }: WorkingIndicatorProps) {
 
   if (!isWorking) return null;
 
-  const hasDetail = Boolean(logs?.reasoning || logs?.usage);
+  const running = logs?.tools.find((t) => t.status === "running");
+  const hasDetail = Boolean(logs?.reasoning || logs?.usage || logs?.tools.length);
 
   return (
     <div
@@ -51,7 +52,8 @@ export function WorkingIndicator({ isWorking, logs }: WorkingIndicatorProps) {
           ))}
         </span>
         <span className="text-xs font-medium text-text-secondary">
-          Working{elapsed > 0 ? ` · ${elapsed}s` : ""}
+          {running ? `Running ${running.name}` : "Working"}
+          {elapsed > 0 ? ` \u00b7 ${elapsed}s` : ""}
         </span>
         {hasDetail && <Icon name="spark" size={12} className="text-text-tertiary" />}
       </button>
@@ -86,6 +88,37 @@ export function WorkingIndicator({ isWorking, logs }: WorkingIndicatorProps) {
                   </div>
                 ))}
               </dl>
+            </div>
+          )}
+
+          {logs.tools.length > 0 && (
+            <div className="mb-3">
+              <div className="flex items-center gap-1.5 mb-1.5 text-text-secondary">
+                <Icon name="tools" size={12} />
+                <span className="text-xs font-medium">Tools</span>
+              </div>
+              <ul className="space-y-1">
+                {logs.tools.map((t) => (
+                  <li key={t.id} className="flex items-start gap-2 text-xs bg-bg-tertiary rounded-lg px-2.5 py-1.5">
+                    <span
+                      aria-hidden="true"
+                      className={`mt-1 w-1.5 h-1.5 rounded-full shrink-0 ${
+                        t.status === "running"
+                          ? "bg-accent-yellow motion-safe:animate-pulse"
+                          : t.status === "error"
+                            ? "bg-accent-red"
+                            : "bg-accent-green"
+                      }`}
+                    />
+                    <div className="min-w-0">
+                      <span className="font-mono text-text-secondary">{t.name}</span>
+                      {t.detail && (
+                        <p className="text-text-tertiary mt-0.5 line-clamp-3 break-words">{t.detail}</p>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 

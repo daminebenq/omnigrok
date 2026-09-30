@@ -233,7 +233,22 @@ export async function getAvailableModels(env: InferenceEnv): Promise<ModelInfo[]
   return models;
 }
 
-// --- Streaming ------------------------------------------------------------
+// --- Streaming + agent loop ----------------------------------------------
+
+import { BUILTIN_TOOLS, dispatchTool, type ToolEnv } from "./tools";
+
+export type StreamEvent =
+  | { type: "token"; content: string }
+  | { type: "reasoning"; content: string }
+  | { type: "tool"; id: string; name: string; status: "running" | "done" | "error"; detail?: string }
+  | { type: "usage"; input: number; output: number; total: number };
+
+export interface ChatMessage {
+  role: string;
+  content: string;
+  tool_calls?: unknown;
+  tool_call_id?: string;
+}
 
 function sse(obj: unknown): string {
   return `data: ${JSON.stringify(obj)}\n\n`;
@@ -241,130 +256,280 @@ function sse(obj: unknown): string {
 
 /** Rough fallback so token counts are never blank when a provider omits usage. */
 function estimateTokens(text: string): number {
-  return estimateTokens2(text.length);
+  return estimateChars(text.length);
 }
 
-function estimateTokens2(chars: number): number {
+function estimateChars(chars: number): number {
   return Math.max(1, Math.round(chars / 4));
 }
 
-export interface StreamResult {
-  stream: ReadableStream<Uint8Array>;
-  /** Resolves with the full assistant text once the upstream stream completes. */
-  completion: Promise<{ text: string; reasoning: string }>;
+/** Yields each complete `data:` payload from an SSE body. */
+async function* sseFrames(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const payload = trimmed.slice(5).trim();
+        if (payload) yield payload;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
-export async function streamInference(
-  messages: Array<{ role: string; content: string }>,
+interface AccumulatedToolCall {
+  id: string;
+  name: string;
+  args: string;
+}
+
+async function callProvider(
+  url: string,
+  key: string,
   model: string,
-  env: InferenceEnv
-): Promise<StreamResult> {
-  const resolved = resolveProvider(model, env);
-  if (!resolved) throw new Error(`No provider configured for model: ${model}`);
-
-  const { url, key, model: providerModel } = resolved;
-
-  const response = await fetch(url, {
+  messages: ChatMessage[],
+  withTools: boolean
+): Promise<Response> {
+  return fetch(url, {
     method: "POST",
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: providerModel,
+      model,
       messages,
       stream: true,
       max_tokens: 4096,
       temperature: 0.7,
+      ...(withTools ? { tools: BUILTIN_TOOLS, tool_choice: "auto" } : {}),
     }),
   });
+}
 
-  if (!response.ok || !response.body) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(`Provider API error ${response.status}: ${detail.slice(0, 300)}`);
+const MAX_TOOL_TURNS = 5;
+
+/**
+ * Drives the model, executing any tools it asks for and feeding the results
+ * back, until it produces a final answer or the turn budget is spent.
+ */
+async function* runAgent(
+  initialMessages: ChatMessage[],
+  model: string,
+  env: InferenceEnv,
+  enableTools: boolean
+): AsyncGenerator<StreamEvent, { text: string; reasoning: string }> {
+  const resolved = resolveProvider(model, env);
+  if (!resolved) throw new Error(`No provider configured for model: ${model}`);
+  const { url, key, model: providerModel } = resolved;
+
+  const convo: ChatMessage[] = [...initialMessages];
+  const promptChars = convo.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+
+  let finalText = "";
+  let allReasoning = "";
+  let usage: { input: number; output: number; total: number } | null = null;
+  let useTools = enableTools;
+
+  for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    let res = await callProvider(url, key, providerModel, convo, useTools);
+
+    // Not every OpenAI-compatible endpoint accepts a `tools` array. If that is
+    // what it rejected, drop tools and try once more rather than failing.
+    if (!res.ok && useTools && res.status >= 400 && res.status < 500) {
+      useTools = false;
+      res = await callProvider(url, key, providerModel, convo, false);
+    }
+    if (!res.ok || !res.body) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`Provider API error ${res.status}: ${detail.slice(0, 300)}`);
+    }
+
+    let text = "";
+    const toolCalls = new Map<number, AccumulatedToolCall>();
+
+    for await (const payload of sseFrames(res.body)) {
+      if (payload === "[DONE]") break;
+      let chunk: any;
+      try {
+        chunk = JSON.parse(payload);
+      } catch {
+        continue; // Skip a malformed frame rather than abort the turn.
+      }
+
+      if (chunk.usage) {
+        usage = {
+          input: chunk.usage.prompt_tokens ?? 0,
+          output: chunk.usage.completion_tokens ?? 0,
+          total: chunk.usage.total_tokens ?? 0,
+        };
+      }
+
+      const delta = chunk.choices?.[0]?.delta ?? {};
+
+      const think = delta.reasoning_content ?? delta.reasoning;
+      if (typeof think === "string" && think) {
+        allReasoning += think;
+        yield { type: "reasoning", content: think };
+      }
+      if (typeof delta.content === "string" && delta.content) {
+        text += delta.content;
+        yield { type: "token", content: delta.content };
+      }
+
+      // Tool call fragments arrive split across chunks, keyed by index.
+      if (Array.isArray(delta.tool_calls)) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index ?? 0;
+          const acc = toolCalls.get(idx) ?? { id: "", name: "", args: "" };
+          if (tc.id) acc.id = tc.id;
+          if (tc.function?.name) acc.name = tc.function.name;
+          if (tc.function?.arguments) acc.args += tc.function.arguments;
+          toolCalls.set(idx, acc);
+        }
+      }
+    }
+
+    if (toolCalls.size === 0) {
+      finalText = text;
+      break;
+    }
+
+    // Record the assistant's tool request, then run each tool.
+    const calls = [...toolCalls.values()].filter((c) => c.name);
+    convo.push({
+      role: "assistant",
+      content: text,
+      tool_calls: calls.map((c) => ({
+        id: c.id || crypto.randomUUID(),
+        type: "function",
+        function: { name: c.name, arguments: c.args || "{}" },
+      })),
+    });
+
+    for (const call of calls) {
+      const id = call.id || crypto.randomUUID();
+      yield { type: "tool", id, name: call.name, status: "running" };
+
+      let args: Record<string, unknown> = {};
+      try {
+        args = call.args ? JSON.parse(call.args) : {};
+      } catch {
+        // Fall through with empty args; the tool reports the problem.
+      }
+
+      const result = await dispatchTool(call.name, args, env as ToolEnv);
+      const failed = result.startsWith("Error:");
+      yield {
+        type: "tool",
+        id,
+        name: call.name,
+        status: failed ? "error" : "done",
+        detail: result.slice(0, 400),
+      };
+
+      convo.push({ role: "tool", tool_call_id: id, content: result });
+    }
+
+    if (turn === MAX_TOOL_TURNS - 1) {
+      finalText = text;
+    }
   }
 
-  const promptChars = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+  if (!usage) {
+    const input = estimateChars(promptChars);
+    const output = estimateTokens(finalText);
+    usage = { input, output, total: input + output };
+  }
+  yield { type: "usage", ...usage };
+
+  return { text: finalText, reasoning: allReasoning };
+}
+
+export interface StreamResult {
+  stream: ReadableStream<Uint8Array>;
+  /** Resolves with the final assistant text once the stream completes. */
+  completion: Promise<{ text: string; reasoning: string }>;
+}
+
+export async function streamInference(
+  messages: ChatMessage[],
+  model: string,
+  env: InferenceEnv,
+  opts: { tools?: boolean } = {}
+): Promise<StreamResult> {
+  // Resolve eagerly so a misconfigured model fails as an HTTP error rather
+  // than as a dead stream the client cannot interpret.
+  if (!resolveProvider(model, env)) {
+    throw new Error(`No provider configured for model: ${model}`);
+  }
+
+  const encoder = new TextEncoder();
+  const agent = runAgent(messages, model, env, opts.tools !== false);
 
   let resolveCompletion!: (v: { text: string; reasoning: string }) => void;
   const completion = new Promise<{ text: string; reasoning: string }>((res) => {
     resolveCompletion = res;
   });
 
-  const upstream = response.body.getReader();
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
+  let settled = false;
+  let partialText = "";
+  let partialReasoning = "";
+  const settle = (v: { text: string; reasoning: string }) => {
+    if (settled) return;
+    settled = true;
+    resolveCompletion(v);
+  };
 
-  let text = "";
-  let reasoning = "";
-  let usage: { input: number; output: number; total: number } | null = null;
-  let buffer = "";
+  // Pull the first event eagerly. If the provider is going to fail outright,
+  // it fails here and the caller can answer with a real HTTP status instead
+  // of a 200 carrying an error frame. Failures on later turns can only be
+  // reported in-band, since headers are long gone by then.
+  let primed: IteratorResult<StreamEvent, { text: string; reasoning: string }> | null =
+    await agent.next();
+  if (primed.done) {
+    settle(primed.value ?? { text: "", reasoning: "" });
+  } else if (primed.value.type === "token") {
+    partialText += primed.value.content;
+  } else if (primed.value.type === "reasoning") {
+    partialReasoning += primed.value.content;
+  }
 
+  // Generator-backed: next() always advances to the next yield or to return,
+  // so a pull can never come back empty and stall the stream.
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
-      // Keep reading until this pull actually enqueues something. A chunk that
-      // ends mid-frame yields no complete SSE line, and a pull that enqueues
-      // nothing is never re-invoked -- which would stall the stream forever.
-      for (;;) {
-      const { done, value } = await upstream.read();
-
-      if (done) {
-        let final = usage;
-        if (!final) {
-          const input = estimateTokens2(promptChars);
-          const output = estimateTokens(text);
-          final = { input, output, total: input + output };
+      try {
+        const { done, value } = primed ?? (await agent.next());
+        primed = null;
+        if (done) {
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+          settle(value ?? { text: partialText, reasoning: partialReasoning });
+          return;
         }
-        controller.enqueue(encoder.encode(sse({ type: "usage", ...final })));
+        if (value.type === "token") partialText += value.content;
+        if (value.type === "reasoning") partialReasoning += value.content;
+        controller.enqueue(encoder.encode(sse(value)));
+      } catch (e) {
+        const message = e instanceof Error ? e.message : "Inference failed";
+        controller.enqueue(encoder.encode(sse({ type: "error", message })));
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
-        resolveCompletion({ text, reasoning });
-        return;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      let enqueued = false;
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const payload = trimmed.slice(5).trim();
-        if (!payload || payload === "[DONE]") continue;
-
-        try {
-          const chunk = JSON.parse(payload) as any;
-
-          if (chunk.usage) {
-            usage = {
-              input: chunk.usage.prompt_tokens ?? 0,
-              output: chunk.usage.completion_tokens ?? 0,
-              total: chunk.usage.total_tokens ?? 0,
-            };
-          }
-
-          const delta = chunk.choices?.[0]?.delta ?? {};
-          // Providers disagree on the reasoning field name.
-          const think = delta.reasoning_content ?? delta.reasoning;
-          if (typeof think === "string" && think) {
-            reasoning += think;
-            controller.enqueue(encoder.encode(sse({ type: "reasoning", content: think })));
-            enqueued = true;
-          }
-          if (typeof delta.content === "string" && delta.content) {
-            text += delta.content;
-            controller.enqueue(encoder.encode(sse({ type: "token", content: delta.content })));
-            enqueued = true;
-          }
-        } catch {
-          // Skip malformed chunk rather than kill the stream.
-        }
-      }
-
-      if (enqueued) return;
+        settle({ text: partialText, reasoning: partialReasoning });
       }
     },
     cancel() {
-      upstream.cancel().catch(() => {});
-      resolveCompletion({ text, reasoning });
+      // Client went away: keep whatever was produced so the thread survives.
+      void agent.return?.({ text: partialText, reasoning: partialReasoning });
+      settle({ text: partialText, reasoning: partialReasoning });
     },
   });
 

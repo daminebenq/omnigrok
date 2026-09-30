@@ -1,65 +1,126 @@
 # OmniGrok Web
 
-OmniGrok as a web app — same multi-provider AI routing as the macOS app, deployed on Cloudflare Workers at `omnigrok.damineweb.work`, protected by Cloudflare Access.
+Multi-provider AI chat, deployed as a Cloudflare Worker at
+**https://omnigrok.damineweb.work** and gated by Cloudflare Access.
 
 ## Architecture
 
-- **Worker** (`src/worker/`): Hono app handling auth, inference proxying, KV storage
-- **Frontend** (`src/web/`): React + Tailwind, SSE streaming, dark theme
-- **Routing**: OmniRoute (primary) → direct providers (Groq, NVIDIA, OpenAI, Gemini, etc.)
+| Piece | Where |
+|---|---|
+| SPA (React + Vite + Tailwind) | `src/web` |
+| Worker API (Hono) | `src/worker` |
+| Conversations, settings, agents, projects, MCP servers | Workers KV |
+| Uploaded files | R2, or any S3-compatible bucket |
 
-## Setup
+### Request flow
 
-### 1. Create KV namespace
+Cloudflare Access gates the hostname and injects `CF-Access-Jwt-Assertion`.
+The worker independently verifies that JWT (RS256 against the team JWKS, plus
+audience and expiry) before serving any `/api/*` route — the edge check alone
+is not treated as sufficient, so a request reaching the origin directly is
+still rejected.
 
-```bash
-wrangler kv namespace create OMNIGROK_KV
+### Streaming protocol
+
+Providers speak OpenAI-compatible SSE. The worker normalizes that into one
+internal event shape so the client has a single format to parse and reasoning
+and usage can ride alongside tokens:
+
+```
+data: {"type":"token","content":"..."}
+data: {"type":"reasoning","content":"..."}
+data: {"type":"tool","id":"...","name":"jarvis_exec","status":"running"}
+data: {"type":"usage","input":11,"output":4,"total":15}
+data: [DONE]
 ```
 
-Copy the `id` into `wrangler.jsonc` under `kv_namespaces`.
+An assistant reply is captured server-side and written to KV after the stream
+finishes, so a reload — or a tab closed mid-answer — keeps the thread.
 
-### 2. Configure Cloudflare Access
+## Configuration
 
-Create an Access application for `omnigrok.damineweb.work` in the Cloudflare Zero Trust dashboard. Copy the **Audience tag** (AUD) into `wrangler.jsonc` as `ALLOWED_AUD`.
+### Vars (`wrangler.jsonc`)
 
-### 3. Add worker secrets
+| Name | Purpose |
+|---|---|
+| `ALLOWED_AUD` | Access application audience tag |
+| `ACCESS_TEAM_DOMAIN` | e.g. `damine.cloudflareaccess.com` |
 
-```bash
-wrangler secret put OMNIROUTE_KEY   # your OmniRoute bearer key
-wrangler secret put GROQ_KEY        # optional
-wrangler secret put OPENAI_KEY      # optional
-wrangler secret put GEMINI_KEY      # optional
-wrangler secret put NVIDIA_KEY      # optional
-wrangler secret put TOGETHER_KEY    # optional
-wrangler secret put HF_KEY          # optional
-wrangler secret put BYTEZ_KEY       # optional
-wrangler secret put JARVIS_TOKEN    # token for jarvis.damineweb.work/api/exec
+### Secrets (`wrangler secret put <NAME>`)
+
+Model providers — set at least one. Without `OMNIROUTE_KEY` the catalog is
+limited to whichever direct providers are configured.
+
+| Name | Provider |
+|---|---|
+| `OMNIROUTE_KEY` | OmniRoute (full catalog, and the fallback for unprefixed models) |
+| `GROQ_KEY` | Groq |
+| `OPENAI_KEY` | OpenAI |
+| `GEMINI_KEY` | Google Gemini |
+| `NVIDIA_KEY` | NVIDIA NIM |
+| `TOGETHER_KEY` | Together AI |
+| `HF_KEY` | Hugging Face |
+| `BYTEZ_KEY` | Bytez |
+| `JARVIS_TOKEN` | Jarvis OS, for the `jarvis_exec` tool |
+
+A model id prefixed with a provider (`groq/...`, `openai/...`) routes directly
+to that provider. Anything else goes to OmniRoute.
+
+### File storage
+
+Files work as soon as one backend is configured. R2 is preferred when present.
+
+**R2** — add to `wrangler.jsonc`:
+
+```jsonc
+"r2_buckets": [{ "binding": "FILES_R2", "bucket_name": "omnigrok-files" }]
 ```
 
-### 4. Build and deploy
+**S3-compatible** (self-hosted MinIO, Backblaze B2, Oracle OCI) — set the
+matching group as secrets:
 
-```bash
-npm install
-npm run build
-wrangler deploy
 ```
+MINIO_ENDPOINT  MINIO_REGION  MINIO_BUCKET  MINIO_ACCESS_KEY_ID  MINIO_SECRET_ACCESS_KEY
+B2_ENDPOINT     B2_REGION     B2_BUCKET     B2_KEY_ID            B2_APP_KEY
+OCI_ENDPOINT    OCI_REGION    OCI_BUCKET    OCI_ACCESS_KEY_ID    OCI_SECRET_ACCESS_KEY
+```
+
+Google Drive is **not** wired up: it needs an OAuth app plus a refresh-token
+flow, which is a separate piece of work.
 
 ## Development
 
 ```bash
 npm install
-npm run dev   # wrangler dev with local KV
+npm run typecheck    # tsc --noEmit
+npm run build        # typecheck, then vite build
+sh test/run.sh       # auth, streaming and agent-loop checks
+npm run deploy       # build, then wrangler deploy
 ```
 
-## Model routing
+`npm run build` gates on `typecheck` deliberately. `vite build` alone uses
+esbuild, which strips types without checking them — that is how a fatal
+prop-contract mismatch previously reached production.
 
-| Prefix | Provider |
-|--------|----------|
-| `groq/` | Groq |
-| `openai/` | OpenAI |
-| `gemini/` | Google Gemini |
-| `nvidia/` | NVIDIA NIM |
-| `together/` | Together AI |
-| `hf/` | Hugging Face |
-| `bytez/` | Bytez |
-| *(none)* | OmniRoute |
+`wrangler dev` serves the app locally, but `/api/*` requires a valid Access
+JWT, so local API calls return 401 unless you front it with Access.
+
+## Tools
+
+The model can call:
+
+- **`jarvis_exec`** — runs a command on Jarvis OS (`jarvis.damineweb.work`).
+  Requires `JARVIS_TOKEN`; without it the tool returns a clear error instead
+  of failing the turn.
+- **`web_browse`** — fetches a page and returns readable text.
+
+Tool turns are capped at 5 per message. Providers that reject a `tools` array
+are automatically retried without it.
+
+## Known gaps
+
+- Google Drive storage backend (see above).
+- MCP servers can be registered and stored, but their tools are not yet
+  exposed to the model — only the two built-ins above are.
+- The browser panel renders pages in a fully sandboxed iframe, so scripts do
+  not run. It is a reader, not a full browser.

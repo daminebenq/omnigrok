@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Dashboard } from "./components/Dashboard";
 import { api, streamChat, ApiError } from "./lib/api";
-import type { Conversation, Message, ModelInfo, TokenUsage } from "./lib/api";
+import type { Conversation, Message, ModelInfo, TokenUsage, ToolEvent } from "./lib/api";
 
 export interface LiveLogs {
   reasoning: string;
   usage?: TokenUsage;
+  tools: ToolEvent[];
   startedAt: number;
 }
 
@@ -152,7 +153,7 @@ export default function App() {
       }));
 
       setStreaming(true);
-      setLogs({ reasoning: "", startedAt: Date.now() });
+      setLogs({ reasoning: "", tools: [], startedAt: Date.now() });
 
       const controller = new AbortController();
       abortRef.current = controller;
@@ -180,6 +181,17 @@ export default function App() {
             }));
           },
           onUsage: (usage) => setLogs((l) => (l ? { ...l, usage } : l)),
+          onTool: (evt) =>
+            setLogs((l) =>
+              l
+                ? {
+                    ...l,
+                    tools: l.tools.some((t) => t.id === evt.id)
+                      ? l.tools.map((t) => (t.id === evt.id ? evt : t))
+                      : [...l.tools, evt],
+                  }
+                : l
+            ),
         });
       } catch (e) {
         if ((e as Error)?.name === "AbortError") return;

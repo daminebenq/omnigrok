@@ -1,10 +1,12 @@
 #!/bin/sh
-# Runnable checks for the worker auth guard and the chat streaming pipeline.
+# Runnable checks: Access auth guard, streaming pipeline, tool-calling loop.
 set -e
 cd "$(dirname "$0")/.."
-npx esbuild src/worker/auth.ts      --format=esm --outfile=test/.tmp-auth.mjs      --log-level=error
-npx esbuild src/worker/inference.ts --format=esm --outfile=test/.tmp-inference.mjs --log-level=error
-npx esbuild src/web/lib/api.ts      --format=esm --outfile=test/.tmp-api.mjs       --log-level=error
+BUNDLE="npx esbuild --bundle --format=esm --platform=neutral --log-level=error"
+$BUNDLE src/worker/auth.ts      --outfile=test/.tmp-auth.mjs
+$BUNDLE src/worker/inference.ts --outfile=test/.tmp-inference.mjs
+$BUNDLE src/web/lib/api.ts      --outfile=test/.tmp-api.mjs
 echo "--- auth ---";   node test/auth.test.mjs
 echo "--- stream ---"; node test/stream.test.mjs
+echo "--- agent ---";  node test/agent.test.mjs
 rm -f test/.tmp-*.mjs

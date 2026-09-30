@@ -60,6 +60,13 @@ export interface TokenUsage {
   total: number;
 }
 
+export interface ToolEvent {
+  id: string;
+  name: string;
+  status: "running" | "done" | "error";
+  detail?: string;
+}
+
 export const api = {
   getModels: async (): Promise<ModelInfo[]> => {
     const res = await af<{ models: ModelInfo[] }>("/api/models");
@@ -93,6 +100,7 @@ export async function streamChat({
   onToken,
   onReasoning,
   onUsage,
+  onTool,
   signal,
 }: {
   conversationId: string;
@@ -101,6 +109,7 @@ export async function streamChat({
   onToken: (chunk: string) => void;
   onReasoning?: (chunk: string) => void;
   onUsage?: (usage: TokenUsage) => void;
+  onTool?: (evt: ToolEvent) => void;
   signal?: AbortSignal;
 }): Promise<void> {
   const res = await fetch("/api/chat", {
@@ -126,6 +135,7 @@ export async function streamChat({
 
   const decoder = new TextDecoder();
   let buffer = "";
+  let streamError: string | null = null;
 
   try {
     for (;;) {
@@ -149,11 +159,22 @@ export async function streamChat({
             input?: number;
             output?: number;
             total?: number;
+            id?: string;
+            name?: string;
+            status?: ToolEvent["status"];
+            detail?: string;
+            message?: string;
           };
           if (evt.type === "token" && evt.content) onToken(evt.content);
           else if (evt.type === "reasoning" && evt.content) onReasoning?.(evt.content);
           else if (evt.type === "usage") {
             onUsage?.({ input: evt.input ?? 0, output: evt.output ?? 0, total: evt.total ?? 0 });
+          } else if (evt.type === "tool" && evt.id && evt.name && evt.status) {
+            onTool?.({ id: evt.id, name: evt.name, status: evt.status, detail: evt.detail });
+          } else if (evt.type === "error") {
+            // The stream opened with 200 before the provider failed, so the
+            // error arrives in-band rather than as an HTTP status.
+            streamError = evt.message ?? "Inference failed";
           }
         } catch {
           // Skip malformed chunk rather than abort the stream.
@@ -163,4 +184,6 @@ export async function streamChat({
   } finally {
     reader.releaseLock();
   }
+
+  if (streamError) throw new ApiError(502, streamError);
 }

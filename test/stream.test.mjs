@@ -82,13 +82,57 @@ check("client reassembles streamed text", text, "Hello, world!");
 check("client receives reasoning", reasoning, "Let me think. ");
 check("client receives usage", usage, { input: 11, output: 4, total: 15 });
 
-// --- error path: provider failure surfaces a real message ---
+// --- error paths ---
+// Immediate provider failure must throw, so the route can answer 502 rather
+// than a 200 carrying an error frame.
 globalThis.fetch = async () => new Response("upstream exploded", { status: 500 });
 let threw = null;
 try {
   await streamInference([{ role: "user", content: "x" }], "openai/gpt-4o", { OPENAI_KEY: "k" });
 } catch (e) { threw = e.message; }
-check("provider error propagates", /500/.test(threw ?? ""), true);
+check("immediate provider error throws (-> HTTP 502)", /500/.test(threw ?? ""), true);
+
+// An unconfigured model must fail fast too.
+threw = null;
+try {
+  await streamInference([{ role: "user", content: "x" }], "openai/gpt-4o", {});
+} catch (e) { threw = e.message; }
+check("unconfigured model throws", /No provider configured/.test(threw ?? ""), true);
+
+// A failure AFTER streaming started can only be reported in-band: the 200
+// and its headers are already sent by then.
+function sseStreamOf(frames) {
+  const e = new TextEncoder();
+  return new ReadableStream({ pull(c) { if (!frames.length) return c.close(); c.enqueue(e.encode(frames.shift())); } });
+}
+let providerCall = 0;
+globalThis.fetch = async (url) => {
+  const u = String(url);
+  if (u.includes("/chat/completions")) {
+    providerCall++;
+    // Turn 1 asks for a tool; turn 2 (after the tool ran) blows up.
+    if (providerCall === 1) {
+      return new Response(sseStreamOf([
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"jarvis_exec","arguments":"{\\"command\\":\\"ls\\"}"}}]}}]}\n\n',
+        'data: [DONE]\n\n',
+      ]), { status: 200 });
+    }
+    return new Response("boom", { status: 500 });
+  }
+  if (u.includes("jarvis.damineweb.work")) {
+    return new Response(JSON.stringify({ output: "ok" }), {
+      status: 200, headers: { "content-type": "application/json" },
+    });
+  }
+  throw new Error("unexpected fetch: " + u);
+};
+const late = await streamInference(
+  [{ role: "user", content: "x" }], "openai/gpt-4o", { OPENAI_KEY: "k", JARVIS_TOKEN: "t" }
+);
+const lateRaw = await new Response(late.stream).text();
+check("mid-stream failure reported in-band", lateRaw.includes('"type":"error"'), true);
+check("stream still terminates cleanly", lateRaw.trim().endsWith("data: [DONE]"), true);
+check("partial work still resolves for persistence", typeof (await late.completion).text, "string");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
