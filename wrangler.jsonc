@@ -1,6 +1,6 @@
 {
   "name": "omnigrok",
-  "main": "dist/worker/index.js",
+  "main": "src/worker/index.ts",
   "compatibility_date": "2025-01-01",
   "assets": {
     "directory": "./dist/web",
@@ -9,11 +9,11 @@
   "kv_namespaces": [
     {
       "binding": "OMNIGROK_KV",
-      "id": "REPLACE_WITH_KV_ID"
+      "id": "3d5f6c1bfb9249e388d8da850c390300"
     }
   ],
   "vars": {
-    "ALLOWED_AUD": "REPLACE_WITH_CF_ACCESS_AUD"
+    "ALLOWED_AUD": "99bc828324f91ffc920b127b08932068bb44a204ddcda215fcfe515618a25fbe"
   },
   "routes": [
     {
