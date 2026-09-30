@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { validateCfAccessToken } from "./auth";
-import { getAvailableModels } from "./inference";
-import { route, classify, buildFallbacks } from "./router";
+import { getAvailableModels, DEFAULT_AUTO_MODEL, AUTO_ROUTERS, isAutoRouter } from "./inference";
+import { route, routeAuto, classify, buildFallbacks } from "./router";
 import { loadCooldowns, isCooling, coolingModels } from "./cooldown";
 import { summarizeUsage } from "./usage";
 import { getInventory, type CfEnv } from "./cfresources";
@@ -199,17 +199,22 @@ app.post("/api/chat", async (c) => {
   let task: string | undefined;
   let routed = false;
 
-  if (model === "auto") {
-    const decision = route(catalog, messages, { exclude: isCooling });
-    if (!decision.model) {
-      return c.json({ error: "Auto routing found no available model" }, 503);
+  // "auto" (or any auto/* router) hands routing and failover to the gateway,
+  // which selects and fails over across the whole catalog server-side. So we
+  // resolve bare "auto" to the task's gateway router and then send it as-is,
+  // WITHOUT a client-side fallback chain — reimplementing that chain over a
+  // single upstream is exactly what surfaced a 429 to the user.
+  const autoRouted = isAutoRouter(model);
+  if (autoRouted) {
+    if (model === "auto") {
+      const decision = routeAuto(catalog, messages, DEFAULT_AUTO_MODEL, AUTO_ROUTERS);
+      model = decision.model;
+      task = decision.task;
+      routed = true;
     }
-    model = decision.model;
-    task = decision.task;
-    routed = true;
   } else if (isCooling(model)) {
-    // The chosen model is cooling down; start on a stand-in instead of
-    // spending the request on a guaranteed 429.
+    // A hand-picked concrete model is cooling down; start on a stand-in instead
+    // of spending the request on a guaranteed 429.
     const { task: kind } = classify(messages);
     const [standIn] = buildFallbacks(catalog, model, kind, 1);
     if (standIn) {
@@ -219,11 +224,14 @@ app.post("/api/chat", async (c) => {
     }
   }
 
-  const fallbacks = buildFallbacks(
-    catalog,
-    model,
-    (task as any) ?? classify(messages).task
-  ).filter((m) => !isCooling(m));
+  // Gateway routers do their own failover; only concrete models need ours.
+  const fallbacks = autoRouted
+    ? []
+    : buildFallbacks(
+        catalog,
+        model,
+        (task as any) ?? classify(messages).task
+      ).filter((m) => !isCooling(m));
 
   // Record the question and mark the thread as running before handing off, so
   // another device that loads mid-run knows to attach.

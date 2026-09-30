@@ -222,9 +222,44 @@ const STATIC_CATALOG: Record<string, { keyEnv: keyof InferenceEnv; ids: string[]
   },
 };
 
+// The gateway's smart routers live under the `auto/` namespace and do
+// server-side model selection + failover across the whole catalog. "auto" as a
+// bare id is NOT a valid gateway model (it 502s); every router must be `auto/*`.
+// Sending one of these is what lets a cooled-down upstream be routed around
+// server-side instead of surfacing a 429 to the user.
+export const DEFAULT_AUTO_MODEL = "auto/best-coding";
+
+// Task -> gateway combo router. Keep every value a real `auto/*` id.
+export const AUTO_ROUTERS: Record<string, string> = {
+  coding: "auto/best-coding",
+  reasoning: "auto/best-reasoning",
+  vision: "auto/best-vision",
+  fast: "auto/fast",
+  "long-context": "auto/best-reasoning",
+  general: "auto/best-chat",
+};
+
+// Curated routers surfaced first in the picker, best/general first.
+const CURATED_AUTO_ROUTERS = [
+  "auto/best-coding",
+  "auto/best-reasoning",
+  "auto/best-chat",
+  "auto/best-vision",
+  "auto/smart",
+  "auto/fast",
+  "auto/cheap",
+  "auto/claude-opus",
+  "auto/claude-sonnet",
+  "auto/best-free",
+];
+
+export function isAutoRouter(model: string): boolean {
+  return model === "auto" || model.startsWith("auto/");
+}
+
 export const AUTO_MODEL: ModelInfo = {
-  id: "auto",
-  provider: "OmniGrok",
+  id: DEFAULT_AUTO_MODEL,
+  provider: "Auto (smart routing)",
   capabilities: ["reasoning", "vision", "coding", "tools"],
   reputation: 100,
   known: true,
@@ -236,12 +271,30 @@ export async function getAvailableModels(env: InferenceEnv): Promise<ModelInfo[]
   if (env.OMNIROUTE_KEY) {
     const fetched = await fetchOmniRouteModels(env.OMNIROUTE_KEY, omniRouteBase(env));
     if (fetched.length) {
-      models.push(...fetched);
+      // Surface the curated `auto/*` combo routers first, as a dedicated group,
+      // so a smart-routing option (which fails over server-side) is always the
+      // easy pick. The gateway already lists these; we just promote and rank
+      // them, and drop any the catalog did not actually return.
+      const fetchedIds = new Set(fetched.map((m) => m.id));
+      const routers = CURATED_AUTO_ROUTERS.filter((id) => fetchedIds.has(id)).map((id) => ({
+        id,
+        provider: "Auto (smart routing)",
+        capabilities: ["reasoning", "vision", "coding", "tools"] as Capability[],
+        reputation: 100,
+        known: true,
+      }));
+      const rest = fetched.filter((m) => !m.id.startsWith("auto/"));
+      models.push(...routers, ...rest);
     } else {
-      // Keep the app usable if the catalog endpoint is down.
-      for (const id of ["antigravity/claude-sonnet-4-6", "agy/claude-sonnet-4-6", "claude-sonnet-failover"]) {
-        models.push(toModelInfo({ id }, "OmniRoute")!);
-      }
+      // Keep the app usable if the catalog endpoint is down: the default combo
+      // router self-routes across the whole gateway, so one entry is enough.
+      models.push({
+        id: DEFAULT_AUTO_MODEL,
+        provider: "Auto (smart routing)",
+        capabilities: ["reasoning", "vision", "coding", "tools"],
+        reputation: 100,
+        known: true,
+      });
     }
   }
 
@@ -252,8 +305,10 @@ export async function getAvailableModels(env: InferenceEnv): Promise<ModelInfo[]
     }
   }
 
-  // Only offer auto-routing when there is more than one model to choose from.
-  if (models.length > 1) models.unshift(AUTO_MODEL);
+  // Offer the "Auto" default at the very top when the gateway didn't already
+  // give us its own routers and there's more than one model to choose from.
+  const hasRouter = models.some((m) => m.id.startsWith("auto/"));
+  if (!hasRouter && models.length > 1) models.unshift(AUTO_MODEL);
 
   return models;
 }

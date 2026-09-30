@@ -148,6 +148,31 @@ export function route(
 }
 
 /**
+ * Route "auto" to the gateway's own `auto/*` combo router for the classified
+ * task, rather than resolving it to one concrete model here. The gateway then
+ * selects the model and fails over server-side across the whole catalog, so a
+ * single cooled-down upstream never surfaces as a 429. Falls back to a listed
+ * router (or the default) when the task's preferred router isn't in the catalog.
+ */
+export function routeAuto(
+  models: ModelInfo[],
+  messages: Array<{ role: string; content: string }>,
+  defaultRouter: string,
+  routers: Record<string, string>,
+  hasAttachments = false
+): RouteDecision {
+  const { task, reason } = classify(messages, hasAttachments);
+  const listed = new Set(models.map((m) => m.id));
+  const preferred = routers[task] ?? defaultRouter;
+  const model = listed.has(preferred)
+    ? preferred
+    : listed.has(defaultRouter)
+      ? defaultRouter
+      : preferred; // send it anyway; the gateway is the source of truth
+  return { model, task, reason: `${reason}; smart-routing via ${model}`, matched: true };
+}
+
+/**
  * Ordered stand-ins for `primary`, best first. Used when a provider reports
  * the chosen model is rate limited, so the turn can continue elsewhere
  * instead of surfacing a 429 to the user.
