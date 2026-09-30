@@ -20,6 +20,16 @@ export interface LiveLogs {
   switchReason?: string;
 }
 
+// The gateway's smart router. Failing over across the whole catalog server-side
+// is what keeps a single cooled-down upstream from surfacing a 429, so a new
+// thread defaults to this rather than to whatever concrete model tops the list.
+export const DEFAULT_MODEL = "auto/best-coding";
+
+function pickDefault(models: ModelInfo[]): string {
+  const router = models.find((m) => m.id.startsWith("auto/"));
+  return router?.id ?? models[0]?.id ?? DEFAULT_MODEL;
+}
+
 function newConv(model: string): Conversation {
   const now = Date.now();
   return {
@@ -231,14 +241,14 @@ export default function App() {
 
   useEffect(() => {
     if (!booted || conversations.length || !models.length) return;
-    const first = newConv(models[0].id);
+    const first = newConv(pickDefault(models));
     setConversations([first]);
     setActiveConvId(first.id);
   }, [booted, conversations.length, models]);
 
   const handleNewChat = useCallback(() => {
     if (!models.length) return;
-    const conv = newConv(activeConv?.model ?? models[0].id);
+    const conv = newConv(activeConv?.model ?? pickDefault(models));
     setConversations((prev) => [conv, ...prev]);
     setActiveConvId(conv.id);
   }, [models, activeConv]);
