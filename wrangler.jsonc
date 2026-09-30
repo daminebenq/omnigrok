@@ -1,0 +1,24 @@
+{
+  "name": "omnigrok",
+  "main": "dist/worker/index.js",
+  "compatibility_date": "2025-01-01",
+  "assets": {
+    "directory": "./dist/web",
+    "binding": "ASSETS"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OMNIGROK_KV",
+      "id": "REPLACE_WITH_KV_ID"
+    }
+  ],
+  "vars": {
+    "ALLOWED_AUD": "REPLACE_WITH_CF_ACCESS_AUD"
+  },
+  "routes": [
+    {
+      "pattern": "omnigrok.damineweb.work/*",
+      "zone_name": "damineweb.work"
+    }
+  ]
+}
