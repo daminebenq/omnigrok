@@ -10,14 +10,18 @@ import { McpPanel } from "./panels/McpPanel";
 import { BrowserPanel } from "./panels/BrowserPanel";
 import { SettingsPanel } from "./panels/SettingsPanel";
 import { StatsPanel } from "./panels/StatsPanel";
+import { SkillsPanel } from "./panels/SkillsPanel";
+import { DevicesPanel } from "./panels/DevicesPanel";
 import type { Conversation, ModelInfo } from "../lib/api";
 import type { LiveLogs } from "../App";
 
-type TabId = "chat" | "agents" | "files" | "projects" | "mcps" | "browser" | "stats" | "settings";
+type TabId = "chat" | "agents" | "skills" | "devices" | "files" | "projects" | "mcps" | "browser" | "stats" | "settings";
 
 const TABS: Array<{ id: TabId; label: string; icon: IconName }> = [
   { id: "chat", label: "Chat", icon: "chat" },
   { id: "agents", label: "Agents", icon: "agents" },
+  { id: "skills", label: "Skills", icon: "spark" },
+  { id: "devices", label: "Devices", icon: "tools" },
   { id: "files", label: "Files", icon: "files" },
   { id: "projects", label: "Projects", icon: "projects" },
   { id: "mcps", label: "MCPs", icon: "mcp" },
@@ -152,6 +156,16 @@ export function Dashboard({
         ) : (
           <div className="h-full overflow-y-auto">
             {activeTab === "agents" && <AgentsPanel models={models} />}
+            {activeTab === "skills" && (
+              <SkillsPanel
+                onRun={(prompt) => {
+                  // Jump back to the conversation so the user sees it running.
+                  setActiveTab("chat");
+                  onSend(prompt);
+                }}
+              />
+            )}
+            {activeTab === "devices" && <DevicesPanel />}
             {activeTab === "files" && <FilesPanel />}
             {activeTab === "projects" && <ProjectsPanel />}
             {activeTab === "mcps" && <McpPanel />}

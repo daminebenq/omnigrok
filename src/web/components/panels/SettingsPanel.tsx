@@ -11,14 +11,30 @@ interface SettingsPanelProps {
 
 export function SettingsPanel({ models, currentModel, onBrowseCatalog }: SettingsPanelProps) {
   const [defaultModel, setDefaultModel] = useState("");
+  const [autoRoute, setAutoRoute] = useState(true);
+  const [toolsEnabled, setToolsEnabled] = useState(true);
   const [email, setEmail] = useState<string | null>(null);
+  const [tools, setTools] = useState<Array<{ name: string; source: string }>>([]);
+  const [cooling, setCooling] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     api.getSettings()
-      .then((s) => setDefaultModel(String(s.defaultModel ?? "")))
+      .then((s) => {
+        setDefaultModel(String(s.defaultModel ?? ""));
+        setAutoRoute(s.autoRoute !== false);
+        setToolsEnabled(s.toolsEnabled !== false);
+      })
       .catch(() => setError("Could not load settings"));
+    fetch("/api/tools")
+      .then((r) => (r.ok ? (r.json() as Promise<{ tools: Array<{ name: string; source: string }> }>) : null))
+      .then((b) => b && setTools(b.tools))
+      .catch(() => {});
+    fetch("/api/cooldowns")
+      .then((r) => (r.ok ? (r.json() as Promise<{ cooling: string[] }>) : null))
+      .then((b) => b && setCooling(b.cooling))
+      .catch(() => {});
     fetch("/api/me")
       .then((r) => (r.ok ? (r.json() as Promise<{ email?: string }>) : null))
       .then((b) => b?.email && setEmail(b.email))
@@ -29,7 +45,7 @@ export function SettingsPanel({ models, currentModel, onBrowseCatalog }: Setting
     setStatus("saving");
     setError(null);
     try {
-      await api.saveSettings({ defaultModel });
+      await api.saveSettings({ defaultModel, autoRoute, toolsEnabled });
       setStatus("saved");
       setTimeout(() => setStatus("idle"), 2000);
     } catch (e) {
@@ -89,6 +105,71 @@ export function SettingsPanel({ models, currentModel, onBrowseCatalog }: Setting
           </ul>
         )}
       </section>
+
+      <section className="p-4 rounded-xl bg-bg-secondary border border-border-subtle mb-4">
+        <h3 className="text-sm font-semibold text-text-primary mb-3">Behaviour</h3>
+        <label className="flex items-start gap-2.5 mb-3 cursor-pointer">
+          <input type="checkbox" checked={autoRoute} onChange={(e) => setAutoRoute(e.target.checked)}
+            className="mt-0.5 accent-accent-purple" />
+          <span>
+            <span className="block text-sm text-text-secondary">Automatic model routing</span>
+            <span className="block text-xs text-text-tertiary">
+              Pick a model per request when the chat is set to auto, and fall through to another
+              when one is rate limited.
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-2.5 cursor-pointer">
+          <input type="checkbox" checked={toolsEnabled} onChange={(e) => setToolsEnabled(e.target.checked)}
+            className="mt-0.5 accent-accent-purple" />
+          <span>
+            <span className="block text-sm text-text-secondary">Allow tool use</span>
+            <span className="block text-xs text-text-tertiary">
+              Lets the model reach Jarvis, your devices, the web and any connected MCP servers.
+            </span>
+          </span>
+        </label>
+        <div className="mt-3">
+          <PrimaryButton icon="check" onClick={save} disabled={status === "saving"}>
+            {status === "saving" ? "Saving" : status === "saved" ? "Saved" : "Save"}
+          </PrimaryButton>
+        </div>
+      </section>
+
+      <section className="p-4 rounded-xl bg-bg-secondary border border-border-subtle mb-4">
+        <h3 className="text-sm font-semibold text-text-primary mb-3">
+          Tools the model can call <span className="text-text-tertiary font-normal">({tools.length})</span>
+        </h3>
+        {tools.length === 0 ? (
+          <p className="text-xs text-text-tertiary">No tools resolved.</p>
+        ) : (
+          <ul className="flex flex-wrap gap-1.5">
+            {tools.map((t) => (
+              <li key={t.name}
+                className="px-2 py-0.5 rounded bg-bg-tertiary text-xs font-mono text-text-secondary">
+                {t.name}
+                {t.source === "mcp" && <span className="ml-1 text-accent-purple not-italic">mcp</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {cooling.length > 0 && (
+        <section className="p-4 rounded-xl bg-bg-secondary border border-border-subtle mb-4">
+          <h3 className="text-sm font-semibold text-text-primary mb-2">Currently rate limited</h3>
+          <p className="text-xs text-text-tertiary mb-2">
+            These are skipped until their cooldown expires. Traffic goes to a fallback instead.
+          </p>
+          <ul className="flex flex-wrap gap-1.5">
+            {cooling.map((m) => (
+              <li key={m} className="px-2 py-0.5 rounded bg-accent-yellow/15 text-xs font-mono text-accent-yellow">
+                {m}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="p-4 rounded-xl bg-bg-secondary border border-border-subtle">
         <h3 className="text-sm font-semibold text-text-primary mb-2">Account</h3>

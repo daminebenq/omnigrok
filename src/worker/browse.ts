@@ -21,6 +21,19 @@ const BLOCKED_IP_PATTERNS = [
   /^\[?fe80:/i,
 ];
 
+export interface BrowseSession {
+  /** Serialised as a Cookie header value. */
+  cookies?: string;
+  userAgent?: string;
+  headers?: Record<string, string>;
+}
+
+/** Headers a caller must not be able to set, because they are ours to control. */
+const RESERVED_HEADERS = new Set([
+  "host", "cookie", "content-length", "connection",
+  "cf-access-client-id", "cf-access-client-secret", "authorization",
+]);
+
 export interface BrowseResult {
   url: string;
   finalUrl: string;
@@ -30,6 +43,8 @@ export interface BrowseResult {
   html: string | null;
   text: string | null;
   truncated: boolean;
+  /** Cookies the site set, ready to be stored back on the profile. */
+  setCookies: string[];
 }
 
 const MAX_BYTES = 2_000_000;
@@ -77,18 +92,37 @@ function htmlToText(html: string): string {
     .trim();
 }
 
-export async function browse(rawUrl: string): Promise<BrowseResult> {
+export async function browse(
+  rawUrl: string,
+  session: BrowseSession = {}
+): Promise<BrowseResult> {
   const url = assertBrowsableUrl(rawUrl);
+
+  const headers: Record<string, string> = {
+    "User-Agent": session.userAgent || "OmniGrok/1.0 (+https://omnigrok.damineweb.work)",
+    Accept: "text/html,application/xhtml+xml,application/json;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+    "Accept-Language": "en-US,en;q=0.9",
+  };
+
+  // Extra headers are caller-supplied, so anything that would let them forge
+  // our own auth or confuse the request framing is dropped.
+  for (const [k, v] of Object.entries(session.headers ?? {})) {
+    if (!RESERVED_HEADERS.has(k.toLowerCase())) headers[k] = v;
+  }
+
+  // Carrying a real session is what keeps sites from treating every visit as a
+  // brand-new anonymous one. It is not a bot-detection bypass.
+  if (session.cookies) headers.Cookie = session.cookies;
 
   const res = await fetch(url.toString(), {
     redirect: "follow",
-    headers: {
-      // Identify honestly rather than impersonating a browser.
-      "User-Agent": "OmniGrok/1.0 (+https://omnigrok.damineweb.work)",
-      Accept: "text/html,application/xhtml+xml,application/json;q=0.9,text/plain;q=0.8,*/*;q=0.5",
-    },
+    headers,
     signal: AbortSignal.timeout(15_000),
   });
+
+  const setCookies = typeof (res.headers as any).getSetCookie === "function"
+    ? ((res.headers as any).getSetCookie() as string[])
+    : (res.headers.get("set-cookie") ? [res.headers.get("set-cookie") as string] : []);
 
   const contentType = res.headers.get("content-type") ?? "";
   const buf = new Uint8Array(await res.arrayBuffer());
@@ -108,5 +142,6 @@ export async function browse(rawUrl: string): Promise<BrowseResult> {
     html: isHtml ? body : null,
     text: isHtml ? htmlToText(body) : body,
     truncated,
+    setCookies,
   };
 }

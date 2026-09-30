@@ -17,6 +17,9 @@ import {
 } from "./resources";
 import { browse } from "./browse";
 import { probeMcpServer } from "./mcp";
+import { AGENT_PRESETS, AGENT_CATEGORIES } from "./catalog/agents";
+import { SKILLS, SKILL_CATEGORIES, getSkill, applySkill } from "./catalog/skills";
+import { deviceHealth, deviceList, deviceRead, type DeviceRecord } from "./devices";
 import { buildToolset } from "./tools";
 import { putFile, getFile, deleteFile, availableBackends, type FileEnv } from "./files";
 import {
@@ -304,10 +307,12 @@ app.post("/api/r/:collection", async (c) => {
 
   // Never let a blank token from the UI wipe a stored secret.
   const merged = { ...(existing ?? {}), ...body, id, name: body.name.trim() } as BaseRecord;
-  if (col === "mcps") {
-    if (!body.authToken && existing?.authToken) merged.authToken = existing.authToken;
-    if (!body.accessClientSecret && existing?.accessClientSecret) {
-      merged.accessClientSecret = existing.accessClientSecret;
+  if (col === "browser" && !body.cookies && existing?.cookies) {
+    merged.cookies = existing.cookies;
+  }
+  if (col === "mcps" || col === "devices") {
+    for (const field of ["authToken", "hostToken", "accessClientSecret"] as const) {
+      if (!body[field] && existing?.[field]) merged[field] = existing[field];
     }
   }
 
@@ -366,13 +371,103 @@ app.get("/api/tools", async (c) => {
   });
 });
 
+// --- Catalogs -------------------------------------------------------------
+
+app.get("/api/catalog/agents", (c) =>
+  c.json({ categories: AGENT_CATEGORIES, presets: AGENT_PRESETS })
+);
+
+app.get("/api/catalog/skills", (c) =>
+  c.json({ categories: SKILL_CATEGORIES, skills: SKILLS })
+);
+
+/** Expand a skill template into the prompt the chat should send. */
+app.post("/api/catalog/skills/:id/apply", async (c) => {
+  const skill = getSkill(c.req.param("id"));
+  if (!skill) return c.json({ error: "Unknown skill" }, 404);
+  const { input } = await c.req.json<{ input?: string }>().catch(() => ({ input: "" }));
+  if (!input?.trim()) return c.json({ error: "Input is required" }, 400);
+  return c.json({ prompt: applySkill(skill, input), skill: skill.id });
+});
+
+// --- Devices --------------------------------------------------------------
+
+async function loadDevice(c: any, id: string): Promise<DeviceRecord | null> {
+  return getRecord<DeviceRecord>(c.env.OMNIGROK_KV, c.get("userId"), "devices", id);
+}
+
+app.get("/api/devices/:id/health", async (c) => {
+  const device = await loadDevice(c, c.req.param("id"));
+  if (!device) return c.json({ error: "Not found" }, 404);
+  return c.json(await deviceHealth(device));
+});
+
+app.get("/api/devices/:id/fs", async (c) => {
+  const device = await loadDevice(c, c.req.param("id"));
+  if (!device) return c.json({ error: "Not found" }, 404);
+  const path = c.req.query("path");
+  if (!path) return c.json({ error: "Missing path" }, 400);
+  try {
+    return c.json(await deviceList(device, path));
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "listing failed" }, 502);
+  }
+});
+
+app.get("/api/devices/:id/file", async (c) => {
+  const device = await loadDevice(c, c.req.param("id"));
+  if (!device) return c.json({ error: "Not found" }, 404);
+  const path = c.req.query("path");
+  if (!path) return c.json({ error: "Missing path" }, 400);
+  try {
+    return c.json(await deviceRead(device, path));
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "read failed" }, 502);
+  }
+});
+
 // --- Built-in browser -----------------------------------------------------
 
 app.post("/api/browse", async (c) => {
-  const { url } = await c.req.json<{ url?: string }>().catch(() => ({ url: undefined }));
-  if (!url) return c.json({ error: "Missing url" }, 400);
+  const body = await c.req
+    .json<{ url?: string; profileId?: string }>()
+    .catch(() => ({}) as { url?: string; profileId?: string });
+  if (!body.url) return c.json({ error: "Missing url" }, 400);
+
+  // A profile carries the cookies and user-agent for a site you are already
+  // signed in to, so the fetch is a returning session rather than a cold one.
+  let session = {};
+  let profile: BaseRecord | null = null;
+  if (body.profileId) {
+    profile = await getRecord<BaseRecord>(c.env.OMNIGROK_KV, c.get("userId"), "browser", body.profileId);
+    if (profile) {
+      session = {
+        cookies: profile.cookies as string | undefined,
+        userAgent: profile.userAgent as string | undefined,
+        headers: (profile.headers as Record<string, string>) ?? {},
+      };
+    }
+  }
+
   try {
-    return c.json(await browse(url));
+    const result = await browse(body.url, session);
+
+    // Persist anything the site set so the next request stays signed in.
+    if (profile && result.setCookies.length) {
+      const jar = new Map<string, string>();
+      for (const pair of String(profile.cookies ?? "").split(";")) {
+        const [k, ...rest] = pair.trim().split("=");
+        if (k) jar.set(k, rest.join("="));
+      }
+      for (const raw of result.setCookies) {
+        const [k, ...rest] = raw.split(";")[0].trim().split("=");
+        if (k) jar.set(k, rest.join("="));
+      }
+      profile.cookies = [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
+      await putRecord(c.env.OMNIGROK_KV, c.get("userId"), "browser", profile);
+    }
+
+    return c.json(result);
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "Fetch failed" }, 400);
   }

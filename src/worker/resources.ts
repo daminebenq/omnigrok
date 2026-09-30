@@ -1,9 +1,9 @@
 // Generic per-user record storage for agents, projects and MCP servers.
 // One implementation, three collections — they differ only in payload shape.
 
-export type Collection = "agents" | "projects" | "mcps" | "files";
+export type Collection = "agents" | "projects" | "mcps" | "files" | "devices" | "browser";
 
-export const COLLECTIONS: Collection[] = ["agents", "projects", "mcps"];
+export const COLLECTIONS: Collection[] = ["agents", "projects", "mcps", "devices", "browser"];
 
 export function isCollection(v: string): v is Collection {
   return (COLLECTIONS as string[]).includes(v);
@@ -80,8 +80,21 @@ export async function deleteRecord(
   await kv.delete(key(userId, col, id));
 }
 
-/** Strips fields that must never reach the browser (e.g. MCP auth tokens). */
+/** Strips fields that must never reach the browser (auth tokens, secrets). */
 export function redact<T extends BaseRecord>(col: Collection, record: T): T {
+  if (col === "browser") {
+    // Cookies are session credentials; report presence, never the value.
+    const { cookies, ...rest } = record as Record<string, unknown>;
+    return { ...rest, hasCookies: Boolean(cookies) } as unknown as T;
+  }
+  if (col === "devices") {
+    const { hostToken, accessClientSecret, ...rest } = record as Record<string, unknown>;
+    return {
+      ...rest,
+      hasHostToken: Boolean(hostToken),
+      hasServiceToken: Boolean(accessClientSecret),
+    } as unknown as T;
+  }
   if (col !== "mcps") return record;
   const { authToken, accessClientSecret, ...rest } = record as unknown as McpServer;
   return {

@@ -192,7 +192,13 @@ export class ChatSession implements DurableObject {
       // Built per run, so newly connected MCP servers are picked up without
       // a redeploy. An unreachable server is skipped, not fatal.
       const toolset = await buildToolset(this.env.OMNIGROK_KV, payload.userId).catch(() => undefined);
-      const { stream } = await streamInference(chat, payload.model, this.env, {
+      const toolEnv = {
+        ...this.env,
+        OMNIGROK_KV: this.env.OMNIGROK_KV,
+        __userId: payload.userId,
+      } as typeof this.env;
+
+      const { stream } = await streamInference(chat, payload.model, toolEnv, {
         toolset,
         fallbacks: payload.fallbacks,
         kv: this.env.OMNIGROK_KV,

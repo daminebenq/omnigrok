@@ -8,7 +8,7 @@ export interface ResourceRecord {
   [key: string]: unknown;
 }
 
-export type ResourceKind = "agents" | "projects" | "mcps";
+export type ResourceKind = "agents" | "projects" | "mcps" | "devices";
 
 /** CRUD against /api/r/<kind>. Shared by the agents, projects and MCP panels. */
 export function useResource<T extends ResourceRecord>(kind: ResourceKind) {

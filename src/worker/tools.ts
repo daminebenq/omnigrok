@@ -3,6 +3,10 @@
 import { browse } from "./browse";
 import { McpClient, type McpAuth } from "./mcp";
 import { listRecords, type BaseRecord } from "./resources";
+import {
+  deviceExec, deviceList, deviceRead, deviceWrite, deviceHealth,
+  type DeviceRecord,
+} from "./devices";
 
 export interface ToolSchema {
   type: "function";
@@ -19,6 +23,9 @@ export interface ToolSchema {
 
 export interface ToolEnv {
   JARVIS_TOKEN?: string;
+  OMNIGROK_KV?: KVNamespace;
+  /** Set per run so device tools can resolve a device by name. */
+  __userId?: string;
 }
 
 export const BUILTIN_TOOLS: ToolSchema[] = [
@@ -57,6 +64,158 @@ export const BUILTIN_TOOLS: ToolSchema[] = [
 
 export const TOOL_NAMES = BUILTIN_TOOLS.map((t) => t.function.name);
 
+const DEVICE_TOOLS: ToolSchema[] = [
+  {
+    type: "function",
+    function: {
+      name: "device_list",
+      description:
+        "List the machines connected to OmniGrok (the user's Mac, VMs, VPSs, homelab hosts) with their status, OS and available disk roots. Call this first to learn which device names are valid.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "device_exec",
+      description:
+        "Run a shell command on one of the user's machines. Use device_list first to get valid device names.",
+      parameters: {
+        type: "object",
+        properties: {
+          device: { type: "string", description: "Device name from device_list" },
+          command: { type: "string", description: "Shell command to run" },
+          cwd: { type: "string", description: "Working directory (optional)" },
+        },
+        required: ["device", "command"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "device_read_dir",
+      description: "List a directory on one of the user's machines.",
+      parameters: {
+        type: "object",
+        properties: {
+          device: { type: "string", description: "Device name" },
+          path: { type: "string", description: "Absolute directory path" },
+        },
+        required: ["device", "path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "device_read_file",
+      description: "Read a text file from one of the user's machines.",
+      parameters: {
+        type: "object",
+        properties: {
+          device: { type: "string", description: "Device name" },
+          path: { type: "string", description: "Absolute file path" },
+        },
+        required: ["device", "path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "device_write_file",
+      description: "Write a text file on one of the user's machines. Overwrites the file.",
+      parameters: {
+        type: "object",
+        properties: {
+          device: { type: "string", description: "Device name" },
+          path: { type: "string", description: "Absolute file path" },
+          content: { type: "string", description: "Full file contents" },
+        },
+        required: ["device", "path", "content"],
+      },
+    },
+  },
+];
+
+async function loadDevices(env: ToolEnv): Promise<DeviceRecord[]> {
+  if (!env.OMNIGROK_KV || !env.__userId) return [];
+  try {
+    const rows = await listRecords<DeviceRecord>(env.OMNIGROK_KV, env.__userId, "devices");
+    return rows.filter((d) => d.enabled !== false && d.url);
+  } catch {
+    return [];
+  }
+}
+
+function findDevice(devices: DeviceRecord[], name: unknown): DeviceRecord | undefined {
+  const wanted = String(name ?? "").trim().toLowerCase();
+  return devices.find((d) => d.name.toLowerCase() === wanted);
+}
+
+async function runDeviceTool(
+  name: string,
+  args: Record<string, unknown>,
+  env: ToolEnv
+): Promise<string> {
+  const devices = await loadDevices(env);
+  if (!devices.length) {
+    return "Error: no devices are connected. Add one in the Devices panel first.";
+  }
+
+  if (name === "device_list") {
+    const health = await Promise.all(
+      devices.map(async (d) => ({ d, h: await deviceHealth(d) }))
+    );
+    return health
+      .map(({ d, h }) =>
+        h.ok
+          ? `${d.name}: ${h.platform} ${h.release ?? ""} (${h.arch}), ${h.cpuCount} cpu, ` +
+            `${h.memUsedPct}% memory used, roots: ${(h.roots ?? []).join(", ")}` +
+            `${d.readOnly || h.readOnly ? " [read-only]" : ""}`
+          : `${d.name}: unreachable (${h.error})`
+      )
+      .join("\n");
+  }
+
+  const device = findDevice(devices, args.device);
+  if (!device) {
+    return `Error: unknown device "${String(args.device)}". Known devices: ${devices.map((d) => d.name).join(", ")}`;
+  }
+
+  try {
+    switch (name) {
+      case "device_exec": {
+        const r = await deviceExec(device, String(args.command ?? ""), args.cwd as string | undefined);
+        const parts = [`exit ${r.exitCode}${r.timedOut ? " (timed out)" : ""}`];
+        if (r.stdout.trim()) parts.push(`stdout:\n${r.stdout.trim()}`);
+        if (r.stderr.trim()) parts.push(`stderr:\n${r.stderr.trim()}`);
+        return parts.join("\n\n").slice(0, 12_000);
+      }
+      case "device_read_dir": {
+        const r = await deviceList(device, String(args.path ?? ""));
+        return `${r.path}\n` + r.entries
+          .map((e) => `${e.dir ? "d" : "-"} ${e.name}${e.dir ? "/" : ` (${e.size} bytes)`}`)
+          .join("\n").slice(0, 12_000);
+      }
+      case "device_read_file": {
+        const r = await deviceRead(device, String(args.path ?? ""));
+        return r.content.slice(0, 12_000);
+      }
+      case "device_write_file": {
+        const r = await deviceWrite(device, String(args.path ?? ""), String(args.content ?? ""));
+        return `Wrote ${r.path}`;
+      }
+    }
+  } catch (e) {
+    return `Error: ${e instanceof Error ? e.message : "device call failed"}`;
+  }
+  return `Unknown device tool: ${name}`;
+}
+
+const DEVICE_TOOL_NAMES = new Set(DEVICE_TOOLS.map((t) => t.function.name));
+
 // --- MCP integration ------------------------------------------------------
 
 /** Provider tool names are constrained; keep them to a safe alphabet. */
@@ -88,7 +247,7 @@ export async function buildToolset(
   kv: KVNamespace,
   userId: string
 ): Promise<Toolset> {
-  const schemas: ToolSchema[] = [...BUILTIN_TOOLS];
+  const schemas: ToolSchema[] = [...BUILTIN_TOOLS, ...DEVICE_TOOLS];
   const mcpRoutes = new Map<string, { url: string; auth: McpAuth; tool: string }>();
 
   let servers: McpServerRecord[] = [];
@@ -185,6 +344,8 @@ export async function dispatchTool(
     case "web_browse":
       return executeBrowse(String(args.url ?? ""));
   }
+
+  if (DEVICE_TOOL_NAMES.has(name)) return runDeviceTool(name, args, env);
 
   const route = toolset?.mcpRoutes.get(name);
   if (route) {
