@@ -118,9 +118,46 @@ The model can call:
 Tool turns are capped at 5 per message. Providers that reject a `tools` array
 are automatically retried without it.
 
+## Devices
+
+A machine runs `host-agent/omnigrok-host.mjs` and OmniGrok reaches it through a
+cloudflared tunnel. Install with:
+
+```bash
+sh host-agent/install.sh --roots "$HOME"        # add --read-only to forbid exec and writes
+```
+
+The agent binds to `127.0.0.1` only and is not reachable from anywhere until a
+tunnel is pointed at it. Two independent credentials guard it: Cloudflare
+Access on the hostname, and a bearer token the agent checks itself. Either
+alone would be a single point of failure.
+
+Add an ingress rule to your tunnel config, **before** the catch-all rule, since
+ingress is matched in order:
+
+```yaml
+  - hostname: mac.example.com
+    service: http://127.0.0.1:8789
+    originRequest:
+      noTLSVerify: true
+      connectTimeout: 30s
+      noHappyEyeballs: true
+  - service: http_status:404
+```
+
+Do not set `http2Origin`: the agent is plain HTTP/1.1 and h2c to such an origin
+drops long requests. Then put an Access application on the hostname with a
+**non-identity** policy allowing a service token, and register the device in the
+Devices panel with the tunnel URL, the agent token from `~/.omnigrok/token`, and
+the service token pair.
+
 ## Known gaps
 
 - Google Drive storage backend (see above).
+- The OmniGrok macOS app's history is not readable from disk: its local stores
+  are ~20KB with no conversation data and its gateway descriptor is encrypted,
+  so that history lives server-side. Importing it needs the gateway's
+  conversation API, not filesystem access.
 - MCP servers can be registered and stored, but their tools are not yet
   exposed to the model — only the two built-ins above are.
 - The browser panel renders pages in a fully sandboxed iframe, so scripts do
