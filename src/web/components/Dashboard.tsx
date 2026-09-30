@@ -1,194 +1,168 @@
 import { useState } from "react";
 import { ChatArea } from "./ChatArea";
+import { Sidebar } from "./Sidebar";
 import { EnhancedModelCatalog } from "./EnhancedModelCatalog";
-import type { ModelInfo } from "../lib/api";
+import { Icon, type IconName } from "./Icon";
+import { AgentsPanel } from "./panels/AgentsPanel";
+import { FilesPanel } from "./panels/FilesPanel";
+import { ProjectsPanel } from "./panels/ProjectsPanel";
+import { McpPanel } from "./panels/McpPanel";
+import { BrowserPanel } from "./panels/BrowserPanel";
+import { SettingsPanel } from "./panels/SettingsPanel";
+import type { Conversation, ModelInfo } from "../lib/api";
+import type { LiveLogs } from "../App";
+
+type TabId = "chat" | "agents" | "files" | "projects" | "mcps" | "browser" | "settings";
+
+const TABS: Array<{ id: TabId; label: string; icon: IconName }> = [
+  { id: "chat", label: "Chat", icon: "chat" },
+  { id: "agents", label: "Agents", icon: "agents" },
+  { id: "files", label: "Files", icon: "files" },
+  { id: "projects", label: "Projects", icon: "projects" },
+  { id: "mcps", label: "MCPs", icon: "mcp" },
+  { id: "browser", label: "Browser", icon: "browser" },
+  { id: "settings", label: "Settings", icon: "settings" },
+];
 
 interface DashboardProps {
   models: ModelInfo[];
-  currentModel: string;
+  conversations: Conversation[];
+  activeConv: Conversation | null;
+  activeConvId: string;
+  streaming: boolean;
+  logs: LiveLogs | null;
+  error: string | null;
+  sidebarOpen: boolean;
+  onToggleSidebar: () => void;
+  onSelectConv: (id: string) => void;
+  onNewChat: () => void;
+  onDeleteConv: (id: string) => void;
   onModelChange: (model: string) => void;
-  messages: any[];
-  onSendMessage: (message: string) => void;
-  isLoading: boolean;
+  onSend: (content: string) => void;
+  onStop: () => void;
+  onDismissError: () => void;
 }
 
-// Tab definitions
-const tabs = [
-  { id: 'chat', label: 'Chat', icon: '💬' },
-  { id: 'agents', label: 'Agents', icon: '🤖' },
-  { id: 'files', label: 'Files', icon: '📁' },
-  { id: 'projects', label: 'Projects', icon: '📋' },
-  { id: 'settings', label: 'Settings', icon: '⚙️' },
-  { id: 'mcps', label: 'MCPs', icon: '🔌' },
-  { id: 'browser', label: 'Browser', icon: '🌐' }
-];
-
-// Placeholder components for each panel
-const AgentsPanel = () => (
-  <div className="p-6">
-    <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">Agents Management</h2>
-    <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-      <p className="text-gray-600 dark:text-gray-300">Create, configure, and manage your AI agents.</p>
-      <button className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
-        + Create New Agent
-      </button>
-    </div>
-  </div>
-);
-
-const FilesPanel = () => (
-  <div className="p-6">
-    <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">Files Management</h2>
-    <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-      <p className="text-gray-600 dark:text-gray-300">Upload, organize, and manage your files.</p>
-      <button className="mt-4 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
-        📤 Upload Files
-      </button>
-    </div>
-  </div>
-);
-
-const ProjectsPanel = () => (
-  <div className="p-6">
-    <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">Projects Management</h2>
-    <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-      <p className="text-gray-600 dark:text-gray-300">Create and manage your projects.</p>
-      <button className="mt-4 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700">
-        + New Project
-      </button>
-    </div>
-  </div>
-);
-
-const SettingsPanel = ({ models, currentModel, onModelChange }: { models: ModelInfo[]; currentModel: string; onModelChange: (model: string) => void }) => {
-  const [showModelCatalog, setShowModelCatalog] = useState(false);
+export function Dashboard({
+  models,
+  conversations,
+  activeConv,
+  activeConvId,
+  streaming,
+  logs,
+  error,
+  sidebarOpen,
+  onToggleSidebar,
+  onSelectConv,
+  onNewChat,
+  onDeleteConv,
+  onModelChange,
+  onSend,
+  onStop,
+  onDismissError,
+}: DashboardProps) {
+  const [activeTab, setActiveTab] = useState<TabId>("chat");
+  const [catalogOpen, setCatalogOpen] = useState(false);
 
   return (
-    <div className="p-6">
-      <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">Settings</h2>
-      <div className="space-y-6">
-        <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">Model Settings</h3>
-          <p className="text-gray-600 dark:text-gray-300 mb-4">Current model: {currentModel}</p>
+    <div className="flex flex-col h-screen bg-bg-primary text-text-primary">
+      {/* Tab rail */}
+      <nav
+        className="flex items-center gap-1 px-2 border-b border-border-subtle bg-bg-secondary/60 backdrop-blur-sm overflow-x-auto"
+        aria-label="Workspace sections"
+      >
+        {TABS.map((tab) => {
+          const active = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              aria-current={active ? "page" : undefined}
+              className={`flex items-center gap-2 px-3.5 py-2.5 text-sm font-medium border-b-2 -mb-px whitespace-nowrap
+                transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-purple/60 rounded-t
+                ${
+                  active
+                    ? "border-accent-purple text-text-primary"
+                    : "border-transparent text-text-tertiary hover:text-text-secondary"
+                }`}
+            >
+              <Icon name={tab.icon} size={15} />
+              {tab.label}
+            </button>
+          );
+        })}
+      </nav>
+
+      {error && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 px-4 py-2.5 bg-accent-red/10 border-b border-accent-red/30 text-sm text-text-primary"
+        >
+          <Icon name="warning" size={15} className="text-accent-red mt-0.5 shrink-0" />
+          <span className="flex-1 min-w-0 break-words">{error}</span>
           <button
-            onClick={() => setShowModelCatalog(true)}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+            onClick={onDismissError}
+            aria-label="Dismiss error"
+            className="shrink-0 p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-bg-hover
+              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-purple/60"
           >
-            🧠 Browse Model Catalog
+            <Icon name="close" size={13} />
           </button>
         </div>
-        
-        <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">API Keys</h3>
-          <p className="text-gray-600 dark:text-gray-300">Manage your API keys for different providers.</p>
-        </div>
-        
-        <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">Preferences</h3>
-          <p className="text-gray-600 dark:text-gray-300">Customize your OmniGrok experience.</p>
-        </div>
+      )}
+
+      <div className="flex-1 min-h-0">
+        {activeTab === "chat" ? (
+          <div className="flex h-full min-h-0">
+            <Sidebar
+              open={sidebarOpen}
+              conversations={conversations}
+              activeId={activeConvId}
+              onSelect={onSelectConv}
+              onDelete={onDeleteConv}
+              onNewChat={onNewChat}
+              models={models}
+              currentModel={activeConv?.model ?? ""}
+              onModelChange={onModelChange}
+              onClose={onToggleSidebar}
+              onBrowseCatalog={() => setCatalogOpen(true)}
+            />
+            <ChatArea
+              conversation={activeConv}
+              streaming={streaming}
+              logs={logs}
+              onSend={onSend}
+              onStop={onStop}
+              onToggleSidebar={onToggleSidebar}
+              sidebarOpen={sidebarOpen}
+            />
+          </div>
+        ) : (
+          <div className="h-full overflow-y-auto">
+            {activeTab === "agents" && <AgentsPanel models={models} />}
+            {activeTab === "files" && <FilesPanel />}
+            {activeTab === "projects" && <ProjectsPanel />}
+            {activeTab === "mcps" && <McpPanel />}
+            {activeTab === "browser" && <BrowserPanel />}
+            {activeTab === "settings" && (
+              <SettingsPanel
+                models={models}
+                currentModel={activeConv?.model ?? ""}
+                onBrowseCatalog={() => setCatalogOpen(true)}
+              />
+            )}
+          </div>
+        )}
       </div>
-      
-      {showModelCatalog && (
+
+      {catalogOpen && (
         <EnhancedModelCatalog
           models={models}
-          current={currentModel}
+          current={activeConv?.model ?? ""}
           onChange={onModelChange}
-          onClose={() => setShowModelCatalog(false)}
+          onClose={() => setCatalogOpen(false)}
         />
       )}
-    </div>
-  );
-};
-
-const MCPsPanel = () => (
-  <div className="p-6">
-    <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">MCP Connections</h2>
-    <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-      <p className="text-gray-600 dark:text-gray-300">Manage your Model Context Protocol connections.</p>
-      <button className="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
-        + Connect MCP Server
-      </button>
-    </div>
-  </div>
-);
-
-const BrowserPanel = () => (
-  <div className="p-6">
-    <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">Built-in Browser</h2>
-    <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4 h-96">
-      <input
-        type="url"
-        placeholder="Enter URL to browse..."
-        className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white mb-4"
-      />
-      <div className="bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg h-full p-4">
-        <p className="text-gray-600 dark:text-gray-300">Browser content will appear here.</p>
-      </div>
-    </div>
-  </div>
-);
-
-export function Dashboard({ models, currentModel, onModelChange, messages, onSendMessage, isLoading }: DashboardProps) {
-  const [activeTab, setActiveTab] = useState('chat');
-
-  const renderPanel = () => {
-    switch (activeTab) {
-      case 'chat':
-        return (
-          <ChatArea
-            messages={messages}
-            onSendMessage={onSendMessage}
-            isLoading={isLoading}
-          />
-        );
-      case 'agents':
-        return <AgentsPanel />;
-      case 'files':
-        return <FilesPanel />;
-      case 'projects':
-        return <ProjectsPanel />;
-      case 'settings':
-        return (
-          <SettingsPanel
-            models={models}
-            currentModel={currentModel}
-            onModelChange={onModelChange}
-          />
-        );
-      case 'mcps':
-        return <MCPsPanel />;
-      case 'browser':
-        return <BrowserPanel />;
-      default:
-        return null;
-    }
-  };
-
-  return (
-    <div className="flex flex-col h-screen bg-white dark:bg-gray-900">
-      {/* Top Navigation Tabs */}
-      <div className="flex border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-              activeTab === tab.id
-                ? 'border-blue-500 text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20'
-                : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800'
-            }`}
-          >
-            <span>{tab.icon}</span>
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Main Content Area */}
-      <div className="flex-1 overflow-hidden">
-        {renderPanel()}
-      </div>
     </div>
   );
 }

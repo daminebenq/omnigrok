@@ -13,7 +13,8 @@
     }
   ],
   "vars": {
-    "ALLOWED_AUD": "99bc828324f91ffc920b127b08932068bb44a204ddcda215fcfe515618a25fbe"
+    "ALLOWED_AUD": "99bc828324f91ffc920b127b08932068bb44a204ddcda215fcfe515618a25fbe",
+    "ACCESS_TEAM_DOMAIN": "damine.cloudflareaccess.com"
   },
   "routes": [
     {

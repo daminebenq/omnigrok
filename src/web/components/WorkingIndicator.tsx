@@ -1,81 +1,102 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import type { LiveLogs } from "../App";
+import { Icon } from "./Icon";
 
 interface WorkingIndicatorProps {
   isWorking: boolean;
-  logs?: {
-    reasoning?: string[];
-    tokens?: { input: number; output: number; total: number };
-    thinking?: string;
-    sources?: string[];
-  };
+  logs: LiveLogs | null;
 }
 
+/** Live "thinking" pill. Hovering (or focusing) reveals reasoning + usage. */
 export function WorkingIndicator({ isWorking, logs }: WorkingIndicatorProps) {
-  const [showLogs, setShowLogs] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    if (!isWorking || !logs) return;
+    const tick = () => setElapsed(Math.floor((Date.now() - logs.startedAt) / 1000));
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [isWorking, logs]);
 
   if (!isWorking) return null;
 
-  return (
-    <div className="relative inline-block">
-      {/* Working animation */}
-      <div 
-        className="flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded-lg cursor-pointer"
-        onMouseEnter={() => setShowLogs(true)}
-        onMouseLeave={() => setShowLogs(false)}
-      >
-        <div className="flex gap-1">
-          <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
-          <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" style={{animationDelay: '0.2s'}}></div>
-          <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" style={{animationDelay: '0.4s'}}></div>
-        </div>
-        <span className="text-sm font-medium">Thinking...</span>
-      </div>
+  const hasDetail = Boolean(logs?.reasoning || logs?.usage);
 
-      {/* Hover logs popup */}
-      {showLogs && logs && (
-        <div className="absolute bottom-full left-0 mb-2 w-80 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl p-4 z-50">
-          <h4 className="font-semibold text-gray-900 dark:text-white mb-3">Processing Details</h4>
-          
-          {logs.reasoning && logs.reasoning.length > 0 && (
+  return (
+    <div
+      className="relative inline-block"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        aria-expanded={open}
+        aria-label={
+          hasDetail ? "Working. Show reasoning and token usage" : "Working"
+        }
+        className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-bg-secondary border border-border-subtle
+          text-accent-purple cursor-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-purple/60"
+      >
+        <span className="flex gap-1" aria-hidden="true">
+          {[0, 0.2, 0.4].map((d) => (
+            <span
+              key={d}
+              className="w-1.5 h-1.5 bg-accent-purple rounded-full motion-safe:animate-pulse"
+              style={{ animationDelay: `${d}s` }}
+            />
+          ))}
+        </span>
+        <span className="text-xs font-medium text-text-secondary">
+          Working{elapsed > 0 ? ` · ${elapsed}s` : ""}
+        </span>
+        {hasDetail && <Icon name="spark" size={12} className="text-text-tertiary" />}
+      </button>
+
+      {open && hasDetail && logs && (
+        <div
+          role="tooltip"
+          className="absolute bottom-full left-0 mb-2 w-96 max-w-[90vw] bg-bg-secondary border border-border-default
+            rounded-xl shadow-2xl p-4 z-50"
+        >
+          <h4 className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-3">
+            Processing details
+          </h4>
+
+          {logs.usage && (
             <div className="mb-3">
-              <h5 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">🧠 Reasoning:</h5>
-              <div className="text-xs text-gray-600 dark:text-gray-400 space-y-1">
-                {logs.reasoning.map((step, i) => (
-                  <div key={i} className="pl-2 border-l-2 border-blue-200 dark:border-blue-700">
-                    {step}
+              <div className="flex items-center gap-1.5 mb-1.5 text-text-secondary">
+                <Icon name="spark" size={12} />
+                <span className="text-xs font-medium">Tokens</span>
+              </div>
+              <dl className="grid grid-cols-3 gap-2 text-xs">
+                {(
+                  [
+                    ["Input", logs.usage.input],
+                    ["Output", logs.usage.output],
+                    ["Total", logs.usage.total],
+                  ] as const
+                ).map(([label, value]) => (
+                  <div key={label} className="bg-bg-tertiary rounded-lg px-2 py-1.5">
+                    <dt className="text-text-tertiary">{label}</dt>
+                    <dd className="text-text-primary font-mono">{value.toLocaleString()}</dd>
                   </div>
                 ))}
-              </div>
+              </dl>
             </div>
           )}
 
-          {logs.tokens && (
-            <div className="mb-3">
-              <h5 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">📊 Token Usage:</h5>
-              <div className="text-xs text-gray-600 dark:text-gray-400">
-                <div>Input: {logs.tokens.input.toLocaleString()}</div>
-                <div>Output: {logs.tokens.output.toLocaleString()}</div>
-                <div>Total: {logs.tokens.total.toLocaleString()}</div>
-              </div>
-            </div>
-          )}
-
-          {logs.thinking && (
-            <div className="mb-3">
-              <h5 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">💭 Thinking:</h5>
-              <div className="text-xs text-gray-600 dark:text-gray-400 max-h-20 overflow-y-auto">
-                {logs.thinking}
-              </div>
-            </div>
-          )}
-
-          {logs.sources && logs.sources.length > 0 && (
+          {logs.reasoning && (
             <div>
-              <h5 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">📚 Sources:</h5>
-              <div className="text-xs text-gray-600 dark:text-gray-400 space-y-1">
-                {logs.sources.map((source, i) => (
-                  <div key={i} className="truncate">{source}</div>
-                ))}
+              <div className="flex items-center gap-1.5 mb-1.5 text-text-secondary">
+                <Icon name="reasoning" size={12} />
+                <span className="text-xs font-medium">Reasoning</span>
+              </div>
+              <div className="text-xs text-text-tertiary leading-relaxed max-h-40 overflow-y-auto whitespace-pre-wrap bg-bg-tertiary rounded-lg p-2.5">
+                {logs.reasoning}
               </div>
             </div>
           )}

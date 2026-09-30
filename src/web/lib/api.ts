@@ -1,4 +1,4 @@
-// Thin fetch wrapper for all /api/* calls
+// Thin fetch wrapper for all /api/* calls.
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -18,21 +18,14 @@ async function af<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export interface Conversation {
-  id: string;
-  title: string;
-  model: string;
-  messages: Message[];
-  createdAt: number;
-  updatedAt: number;
-}
+export type Capability = "reasoning" | "vision" | "coding" | "audio" | "image" | "tools";
 
-export interface Message {
+export interface ModelInfo {
   id: string;
-  role: "user" | "assistant" | "tool";
-  content: string;
-  toolCalls?: ToolCall[];
-  timestamp: number;
+  provider: string;
+  capabilities: Capability[];
+  contextLength?: number;
+  reputation: number;
 }
 
 export interface ToolCall {
@@ -43,9 +36,28 @@ export interface ToolCall {
   status: "pending" | "done" | "error";
 }
 
-export interface ModelInfo {
+export interface Message {
   id: string;
-  provider: string;
+  role: "user" | "assistant" | "tool";
+  content: string;
+  reasoning?: string;
+  toolCalls?: ToolCall[];
+  createdAt: number;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  model: string;
+  messages: Message[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TokenUsage {
+  input: number;
+  output: number;
+  total: number;
 }
 
 export const api = {
@@ -53,8 +65,16 @@ export const api = {
     const res = await af<{ models: ModelInfo[] }>("/api/models");
     return res.models;
   },
-  getConversations: () => af<{ conversations: Conversation[] }>("/api/conversations"),
+  getConversations: async (): Promise<Conversation[]> => {
+    const res = await af<{ conversations: Conversation[] }>("/api/conversations");
+    return res.conversations;
+  },
   getConversation: (id: string) => af<Conversation>(`/api/conversations/${id}`),
+  saveConversation: (conv: Conversation) =>
+    af<{ ok: boolean }>("/api/conversations", {
+      method: "POST",
+      body: JSON.stringify(conv),
+    }),
   deleteConversation: (id: string) =>
     af<{ ok: boolean }>(`/api/conversations/${id}`, { method: "DELETE" }),
   getSettings: () => af<Record<string, unknown>>("/api/settings"),
@@ -62,24 +82,43 @@ export const api = {
     af<{ ok: boolean }>("/api/settings", { method: "POST", body: JSON.stringify(s) }),
 };
 
+/**
+ * Consumes the worker's normalized SSE protocol:
+ *   {"type":"token"|"reasoning","content":"..."} | {"type":"usage",...}
+ */
 export async function streamChat({
+  conversationId,
   messages,
   model,
-  onChunk,
+  onToken,
+  onReasoning,
+  onUsage,
+  signal,
 }: {
+  conversationId: string;
   messages: Message[];
   model: string;
-  onChunk: (chunk: string) => void;
+  onToken: (chunk: string) => void;
+  onReasoning?: (chunk: string) => void;
+  onUsage?: (usage: TokenUsage) => void;
+  signal?: AbortSignal;
 }): Promise<void> {
   const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, model }),
+    body: JSON.stringify({ conversationId, messages, model }),
+    signal,
   });
 
   if (!res.ok) {
     const text = await res.text().catch(() => "Unknown error");
-    throw new ApiError(res.status, text);
+    let msg = text;
+    try {
+      msg = (JSON.parse(text) as { error?: string }).error ?? text;
+    } catch {
+      /* plain-text error */
+    }
+    throw new ApiError(res.status, msg);
   }
 
   const reader = res.body?.getReader();
@@ -89,29 +128,35 @@ export async function streamChat({
   let buffer = "";
 
   try {
-    while (true) {
+    for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-      
-      // Process complete lines
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || ''; // Keep incomplete line in buffer
-      
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
       for (const line of lines) {
-        if (line.trim() && line.startsWith('data: ')) {
-          const data = line.slice(6);
-          if (data !== '[DONE]') {
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.content) {
-                onChunk(parsed.content);
-              }
-            } catch (e) {
-              // Ignore malformed JSON chunks
-            }
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const payload = trimmed.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+
+        try {
+          const evt = JSON.parse(payload) as {
+            type?: string;
+            content?: string;
+            input?: number;
+            output?: number;
+            total?: number;
+          };
+          if (evt.type === "token" && evt.content) onToken(evt.content);
+          else if (evt.type === "reasoning" && evt.content) onReasoning?.(evt.content);
+          else if (evt.type === "usage") {
+            onUsage?.({ input: evt.input ?? 0, output: evt.output ?? 0, total: evt.total ?? 0 });
           }
+        } catch {
+          // Skip malformed chunk rather than abort the stream.
         }
       }
     }

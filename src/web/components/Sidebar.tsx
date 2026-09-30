@@ -13,6 +13,7 @@ interface SidebarProps {
   currentModel: string;
   onModelChange: (model: string) => void;
   onClose: () => void;
+  onBrowseCatalog: () => void;
 }
 
 function timeAgo(ts: number): string {
@@ -28,7 +29,7 @@ function timeAgo(ts: number): string {
 
 export function Sidebar({
   open, conversations, activeId, onSelect, onDelete, onNewChat,
-  models, currentModel, onModelChange, onClose,
+  models, currentModel, onModelChange, onClose, onBrowseCatalog,
 }: SidebarProps) {
   const [hoverId, setHoverId] = useState<string | null>(null);
 
@@ -119,6 +120,13 @@ export function Sidebar({
       {/* Model switcher at bottom */}
       <div className="border-t border-border-subtle p-3">
         <ModelSwitcher models={models} current={currentModel} onChange={onModelChange} />
+        <button
+          onClick={onBrowseCatalog}
+          className="mt-2 w-full text-xs text-text-tertiary hover:text-text-primary transition-colors py-1.5 rounded-md
+            hover:bg-bg-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-purple/60"
+        >
+          Browse all {models.length} models
+        </button>
       </div>
     </aside>
   );
