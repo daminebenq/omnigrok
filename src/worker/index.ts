@@ -4,7 +4,6 @@ import { validateCfAccessToken } from "./auth";
 import { streamInference, getAvailableModels } from "./inference";
 import { listConversations, getConversation, saveConversation, deleteConversation, getSettings, saveSettings } from "./storage";
 import { BUILTIN_TOOLS } from "./tools";
-import { randomUUID } from "node:crypto";
 
 interface Bindings {
   OMNIGROK_KV: KVNamespace;
@@ -19,6 +18,11 @@ interface Bindings {
   GEMINI_KEY?: string;
   BYTEZ_KEY?: string;
   JARVIS_TOKEN?: string;
+}
+
+// Generate UUID using Web Crypto API
+function generateUUID(): string {
+  return crypto.randomUUID();
 }
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -95,7 +99,7 @@ app.post("/api/chat", async (c) => {
     }
 
     // Save conversation before streaming
-    const conversationId = randomUUID();
+    const conversationId = generateUUID();
     await saveConversation(c.env.OMNIGROK_KV, userId, {
       id: conversationId,
       title: messages[0]?.content?.slice(0, 50) + "..." || "New Chat",
