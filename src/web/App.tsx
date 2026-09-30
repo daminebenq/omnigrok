@@ -28,7 +28,11 @@ export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [logs, setLogs] = useState<LiveLogs | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Below the lg breakpoint the sidebar overlays the chat, so it must not
+  // start open there.
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => typeof window === "undefined" || window.innerWidth >= 1024
+  );
   const [booted, setBooted] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -205,11 +209,18 @@ export default function App() {
         abortRef.current = null;
         setStreaming(false);
         setLogs(null);
-        // Refresh from the server, which holds the authoritative copy written
-        // after the stream finished.
+        // Reconcile with the server copy, which is written from waitUntil after
+        // the stream ends. That write races this read, and KV is eventually
+        // consistent, so a stale response is normal -- adopt it only when it is
+        // at least as complete as what we already have, or it would wipe the
+        // reply the user just watched arrive.
         api
           .getConversation(convId)
-          .then((fresh) => patchConv(convId, () => fresh))
+          .then((fresh) =>
+            patchConv(convId, (local) =>
+              fresh.messages.length >= local.messages.length ? fresh : local
+            )
+          )
           .catch(() => {});
       }
     },

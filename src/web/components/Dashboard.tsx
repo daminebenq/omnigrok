@@ -113,7 +113,14 @@ export function Dashboard({
 
       <div className="flex-1 min-h-0">
         {activeTab === "chat" ? (
-          <div className="flex h-full min-h-0">
+          <div className="flex h-full min-h-0 relative">
+            {sidebarOpen && (
+              <button
+                aria-label="Close conversations"
+                onClick={onToggleSidebar}
+                className="lg:hidden fixed inset-0 z-20 bg-black/50 cursor-default"
+              />
+            )}
             <Sidebar
               open={sidebarOpen}
               conversations={conversations}

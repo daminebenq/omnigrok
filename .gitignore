@@ -4,3 +4,4 @@ dist/
 .dev.vars
 test/.tmp-*.mjs
 .DS_Store
+.devstub/

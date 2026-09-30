@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "omnigrok-ui-harness",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [".devstub/server.mjs"],
+      "port": 8788
+    }
+  ]
+}
