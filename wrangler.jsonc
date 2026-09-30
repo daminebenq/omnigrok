@@ -1,5 +1,6 @@
 {
   "name": "omnigrok",
+  "account_id": "9d7461a47e946b6956278cb3ca1655da",
   "main": "src/worker/index.ts",
   "compatibility_date": "2025-01-01",
   "assets": {
