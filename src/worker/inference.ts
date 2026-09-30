@@ -26,8 +26,16 @@ export const PROVIDERS: ProviderConfig[] = [
   { prefix: "bytez", label: "Bytez", url: "https://api.bytez.com/models/v2/openai/v1/chat/completions", keyEnv: "BYTEZ_KEY" },
 ];
 
+/** The user's own gateway, the same one the OmniGrok macOS app talks to. */
+const DEFAULT_OMNIROUTE_BASE = "https://omniroute.damineweb.work/v1";
+
+function omniRouteBase(env: InferenceEnv): string {
+  return (env.OMNIROUTE_BASE_URL ?? DEFAULT_OMNIROUTE_BASE).replace(/\/+$/, "");
+}
+
 export interface InferenceEnv {
   OMNIROUTE_KEY?: string;
+  OMNIROUTE_BASE_URL?: string;
   GROQ_KEY?: string;
   NVIDIA_KEY?: string;
   TOGETHER_KEY?: string;
@@ -57,7 +65,7 @@ function resolveProvider(model: string, env: InferenceEnv): { url: string; key: 
     }
   }
   if (env.OMNIROUTE_KEY) {
-    return { url: "https://api.omniroute.tech/v1/chat/completions", key: env.OMNIROUTE_KEY, model };
+    return { url: `${omniRouteBase(env)}/chat/completions`, key: env.OMNIROUTE_KEY, model };
   }
   return null;
 }
@@ -145,9 +153,9 @@ function toModelInfo(raw: RawModel, fallbackProvider: string): ModelInfo | null 
   };
 }
 
-async function fetchOmniRouteModels(apiKey: string): Promise<ModelInfo[]> {
+async function fetchOmniRouteModels(apiKey: string, baseUrl: string): Promise<ModelInfo[]> {
   try {
-    const response = await fetch("https://api.omniroute.tech/v1/models", {
+    const response = await fetch(`${baseUrl}/models`, {
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       signal: AbortSignal.timeout(15_000),
     });
@@ -212,7 +220,7 @@ export async function getAvailableModels(env: InferenceEnv): Promise<ModelInfo[]
   const models: ModelInfo[] = [];
 
   if (env.OMNIROUTE_KEY) {
-    const fetched = await fetchOmniRouteModels(env.OMNIROUTE_KEY);
+    const fetched = await fetchOmniRouteModels(env.OMNIROUTE_KEY, omniRouteBase(env));
     if (fetched.length) {
       models.push(...fetched);
     } else {

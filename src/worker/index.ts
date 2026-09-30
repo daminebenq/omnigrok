@@ -29,6 +29,7 @@ interface Bindings {
   ALLOWED_AUD: string;
   ACCESS_TEAM_DOMAIN: string;
   OMNIROUTE_KEY?: string;
+  OMNIROUTE_BASE_URL?: string;
   GROQ_KEY?: string;
   NVIDIA_KEY?: string;
   TOGETHER_KEY?: string;

@@ -54,6 +54,7 @@ limited to whichever direct providers are configured.
 | Name | Provider |
 |---|---|
 | `OMNIROUTE_KEY` | OmniRoute (full catalog, and the fallback for unprefixed models) |
+| `OMNIROUTE_BASE_URL` | Optional. Defaults to `https://omniroute.damineweb.work/v1`, the same gateway the macOS app uses. |
 | `GROQ_KEY` | Groq |
 | `OPENAI_KEY` | OpenAI |
 | `GEMINI_KEY` | Google Gemini |
