@@ -9,10 +9,11 @@ import { ProjectsPanel } from "./panels/ProjectsPanel";
 import { McpPanel } from "./panels/McpPanel";
 import { BrowserPanel } from "./panels/BrowserPanel";
 import { SettingsPanel } from "./panels/SettingsPanel";
+import { StatsPanel } from "./panels/StatsPanel";
 import type { Conversation, ModelInfo } from "../lib/api";
 import type { LiveLogs } from "../App";
 
-type TabId = "chat" | "agents" | "files" | "projects" | "mcps" | "browser" | "settings";
+type TabId = "chat" | "agents" | "files" | "projects" | "mcps" | "browser" | "stats" | "settings";
 
 const TABS: Array<{ id: TabId; label: string; icon: IconName }> = [
   { id: "chat", label: "Chat", icon: "chat" },
@@ -21,6 +22,7 @@ const TABS: Array<{ id: TabId; label: string; icon: IconName }> = [
   { id: "projects", label: "Projects", icon: "projects" },
   { id: "mcps", label: "MCPs", icon: "mcp" },
   { id: "browser", label: "Browser", icon: "browser" },
+  { id: "stats", label: "Stats", icon: "spark" },
   { id: "settings", label: "Settings", icon: "settings" },
 ];
 
@@ -30,6 +32,7 @@ interface DashboardProps {
   activeConv: Conversation | null;
   activeConvId: string;
   streaming: boolean;
+  streamingIds: Set<string>;
   logs: LiveLogs | null;
   error: string | null;
   sidebarOpen: boolean;
@@ -49,6 +52,7 @@ export function Dashboard({
   activeConv,
   activeConvId,
   streaming,
+  streamingIds,
   logs,
   error,
   sidebarOpen,
@@ -132,6 +136,7 @@ export function Dashboard({
               currentModel={activeConv?.model ?? ""}
               onModelChange={onModelChange}
               onClose={onToggleSidebar}
+              streamingIds={streamingIds}
               onBrowseCatalog={() => setCatalogOpen(true)}
             />
             <ChatArea
@@ -151,11 +156,12 @@ export function Dashboard({
             {activeTab === "projects" && <ProjectsPanel />}
             {activeTab === "mcps" && <McpPanel />}
             {activeTab === "browser" && <BrowserPanel />}
+            {activeTab === "stats" && <StatsPanel />}
             {activeTab === "settings" && (
               <SettingsPanel
                 models={models}
                 currentModel={activeConv?.model ?? ""}
-                onBrowseCatalog={() => setCatalogOpen(true)}
+              onBrowseCatalog={() => setCatalogOpen(true)}
               />
             )}
           </div>

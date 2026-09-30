@@ -7,8 +7,12 @@ $BUNDLE src/worker/auth.ts      --outfile=test/.tmp-auth.mjs
 $BUNDLE src/worker/inference.ts --outfile=test/.tmp-inference.mjs
 $BUNDLE src/web/lib/api.ts      --outfile=test/.tmp-api.mjs
 $BUNDLE src/worker/browse.ts    --outfile=test/.tmp-browse.mjs
+$BUNDLE src/worker/session.ts   --outfile=test/.tmp-session.mjs
+$BUNDLE src/worker/router.ts    --outfile=test/.tmp-router.mjs
 echo "--- auth ---";   node test/auth.test.mjs
 echo "--- stream ---"; node test/stream.test.mjs
 echo "--- agent ---";  node test/agent.test.mjs
 echo "--- browse ---"; node test/browse.test.mjs
+echo "--- session ---"; node test/session.test.mjs
+echo "--- router ---"; node test/router.test.mjs
 rm -f test/.tmp-*.mjs

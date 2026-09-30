@@ -52,6 +52,8 @@ export interface Conversation {
   messages: Message[];
   createdAt: number;
   updatedAt: number;
+  status?: "generating";
+  lastError?: string;
 }
 
 export interface TokenUsage {
@@ -89,36 +91,21 @@ export const api = {
     af<{ ok: boolean }>("/api/settings", { method: "POST", body: JSON.stringify(s) }),
 };
 
-/**
- * Consumes the worker's normalized SSE protocol:
- *   {"type":"token"|"reasoning","content":"..."} | {"type":"usage",...}
- */
-export async function streamChat({
-  conversationId,
-  messages,
-  model,
-  onToken,
-  onReasoning,
-  onUsage,
-  onTool,
-  signal,
-}: {
-  conversationId: string;
-  messages: Message[];
-  model: string;
+export interface StreamHandlers {
   onToken: (chunk: string) => void;
   onReasoning?: (chunk: string) => void;
   onUsage?: (usage: TokenUsage) => void;
   onTool?: (evt: ToolEvent) => void;
-  signal?: AbortSignal;
-}): Promise<void> {
-  const res = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ conversationId, messages, model }),
-    signal,
-  });
+  /** Last sequence number seen, so a reconnect can resume from it. */
+  onSeq?: (seq: number) => void;
+}
 
+/**
+ * Consumes the session's SSE protocol. Events carry a `seq` so a client that
+ * reconnects can ask to replay from where it left off rather than losing
+ * whatever arrived while it was away.
+ */
+async function consume(res: Response, h: StreamHandlers): Promise<void> {
   if (!res.ok) {
     const text = await res.text().catch(() => "Unknown error");
     let msg = text;
@@ -154,6 +141,7 @@ export async function streamChat({
 
         try {
           const evt = JSON.parse(payload) as {
+            seq?: number;
             type?: string;
             content?: string;
             input?: number;
@@ -165,19 +153,19 @@ export async function streamChat({
             detail?: string;
             message?: string;
           };
-          if (evt.type === "token" && evt.content) onToken(evt.content);
-          else if (evt.type === "reasoning" && evt.content) onReasoning?.(evt.content);
+          if (typeof evt.seq === "number") h.onSeq?.(evt.seq);
+
+          if (evt.type === "token" && evt.content) h.onToken(evt.content);
+          else if (evt.type === "reasoning" && evt.content) h.onReasoning?.(evt.content);
           else if (evt.type === "usage") {
-            onUsage?.({ input: evt.input ?? 0, output: evt.output ?? 0, total: evt.total ?? 0 });
+            h.onUsage?.({ input: evt.input ?? 0, output: evt.output ?? 0, total: evt.total ?? 0 });
           } else if (evt.type === "tool" && evt.id && evt.name && evt.status) {
-            onTool?.({ id: evt.id, name: evt.name, status: evt.status, detail: evt.detail });
+            h.onTool?.({ id: evt.id, name: evt.name, status: evt.status, detail: evt.detail });
           } else if (evt.type === "error") {
-            // The stream opened with 200 before the provider failed, so the
-            // error arrives in-band rather than as an HTTP status.
             streamError = evt.message ?? "Inference failed";
           }
         } catch {
-          // Skip malformed chunk rather than abort the stream.
+          // Skip a malformed frame rather than abort the stream.
         }
       }
     }
@@ -186,4 +174,45 @@ export async function streamChat({
   }
 
   if (streamError) throw new ApiError(502, streamError);
+}
+
+/** Starts a run. Generation continues server-side even if this client leaves. */
+export async function streamChat(
+  opts: {
+    conversationId: string;
+    messages: Message[];
+    model: string;
+    signal?: AbortSignal;
+  } & StreamHandlers
+): Promise<void> {
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      conversationId: opts.conversationId,
+      messages: opts.messages,
+      model: opts.model,
+    }),
+    signal: opts.signal,
+  });
+  return consume(res, opts);
+}
+
+/** Re-attaches to a run already in progress, replaying from `from`. */
+export async function attachChat(
+  opts: { conversationId: string; from?: number; signal?: AbortSignal } & StreamHandlers
+): Promise<void> {
+  const res = await fetch(
+    `/api/chat/attach?conversationId=${encodeURIComponent(opts.conversationId)}&from=${opts.from ?? 0}`,
+    { signal: opts.signal }
+  );
+  return consume(res, opts);
+}
+
+export async function cancelChat(conversationId: string): Promise<void> {
+  await fetch("/api/chat/cancel", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversationId }),
+  }).catch(() => {});
 }

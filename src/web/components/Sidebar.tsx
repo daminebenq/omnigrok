@@ -14,6 +14,8 @@ interface SidebarProps {
   onModelChange: (model: string) => void;
   onClose: () => void;
   onBrowseCatalog: () => void;
+  /** Threads generating right now, including ones that are not on screen. */
+  streamingIds: Set<string>;
 }
 
 function timeAgo(ts: number): string {
@@ -29,7 +31,7 @@ function timeAgo(ts: number): string {
 
 export function Sidebar({
   open, conversations, activeId, onSelect, onDelete, onNewChat,
-  models, currentModel, onModelChange, onClose, onBrowseCatalog,
+  models, currentModel, onModelChange, onClose, onBrowseCatalog, streamingIds,
 }: SidebarProps) {
   const [hoverId, setHoverId] = useState<string | null>(null);
 
@@ -101,7 +103,16 @@ export function Sidebar({
             </svg>
             <div className="flex-1 min-w-0">
               <p className="text-sm truncate leading-snug">{conv.title}</p>
-              <p className="text-xs text-text-tertiary mt-0.5">{timeAgo(conv.updatedAt)}</p>
+              <p className="text-xs text-text-tertiary mt-0.5 flex items-center gap-1.5">
+                {streamingIds.has(conv.id) ? (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-accent-purple motion-safe:animate-pulse" />
+                    <span className="text-accent-purple">Working</span>
+                  </>
+                ) : (
+                  timeAgo(conv.updatedAt)
+                )}
+              </p>
             </div>
             {(hoverId === conv.id || activeId === conv.id) && (
               <button

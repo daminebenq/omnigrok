@@ -7,6 +7,14 @@
     "directory": "./dist/web",
     "binding": "ASSETS"
   },
+  "durable_objects": {
+    "bindings": [
+      { "name": "CHAT_SESSION", "class_name": "ChatSession" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ChatSession"] }
+  ],
   "kv_namespaces": [
     {
       "binding": "OMNIGROK_KV",

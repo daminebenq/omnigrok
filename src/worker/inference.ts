@@ -216,6 +216,13 @@ const STATIC_CATALOG: Record<string, { keyEnv: keyof InferenceEnv; ids: string[]
   },
 };
 
+export const AUTO_MODEL: ModelInfo = {
+  id: "auto",
+  provider: "OmniGrok",
+  capabilities: ["reasoning", "vision", "coding", "tools"],
+  reputation: 100,
+};
+
 export async function getAvailableModels(env: InferenceEnv): Promise<ModelInfo[]> {
   const models: ModelInfo[] = [];
 
@@ -237,6 +244,9 @@ export async function getAvailableModels(env: InferenceEnv): Promise<ModelInfo[]
       models.push(toModelInfo({ id, provider: entry.provider }, entry.provider)!);
     }
   }
+
+  // Only offer auto-routing when there is more than one model to choose from.
+  if (models.length > 1) models.unshift(AUTO_MODEL);
 
   return models;
 }

@@ -31,6 +31,9 @@ export interface Conversation {
   messages: Message[];
   createdAt: number;
   updatedAt: number;
+  /** "generating" while a ChatSession is mid-run, so any device can re-attach. */
+  status?: "generating";
+  lastError?: string;
 }
 
 export interface UserSettings {

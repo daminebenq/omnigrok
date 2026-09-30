@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import { validateCfAccessToken } from "./auth";
-import { streamInference, getAvailableModels } from "./inference";
+import { getAvailableModels } from "./inference";
+import { route } from "./router";
+import { summarizeUsage } from "./usage";
+import { getInventory, type CfEnv } from "./cfresources";
+export { ChatSession } from "./session";
 import {
   listRecords,
   getRecord,
@@ -25,11 +29,14 @@ import {
 
 interface Bindings {
   OMNIGROK_KV: KVNamespace;
+  CHAT_SESSION: DurableObjectNamespace;
   ASSETS: Fetcher;
   ALLOWED_AUD: string;
   ACCESS_TEAM_DOMAIN: string;
   OMNIROUTE_KEY?: string;
   OMNIROUTE_BASE_URL?: string;
+  CF_API_TOKEN?: string;
+  CF_ACCOUNT_ID?: string;
   GROQ_KEY?: string;
   NVIDIA_KEY?: string;
   TOGETHER_KEY?: string;
@@ -148,6 +155,12 @@ function deriveTitle(messages: Message[]): string {
   return clean.length > 60 ? `${clean.slice(0, 60)}...` : clean;
 }
 
+/** One session per (user, conversation), so ids never collide across users. */
+function sessionStub(c: any, conversationId: string) {
+  const name = `${c.get("userId")}:${conversationId}`;
+  return c.env.CHAT_SESSION.get(c.env.CHAT_SESSION.idFromName(name));
+}
+
 app.post("/api/chat", async (c) => {
   const userId = c.get("userId");
   const kv = c.env.OMNIGROK_KV;
@@ -159,18 +172,31 @@ app.post("/api/chat", async (c) => {
     return c.json({ error: "Invalid JSON body" }, 400);
   }
 
-  const { messages, model, conversationId } = body;
+  const { messages, conversationId } = body;
+  let model = body.model;
   if (!Array.isArray(messages) || !messages.length || !model) {
     return c.json({ error: "Missing messages or model" }, 400);
   }
-  if (!conversationId) {
-    return c.json({ error: "Missing conversationId" }, 400);
+  if (!conversationId) return c.json({ error: "Missing conversationId" }, 400);
+
+  // "auto" means: pick the right model for this particular request.
+  let task: string | undefined;
+  let routed = false;
+  if (model === "auto") {
+    const catalog = await getAvailableModels(c.env);
+    const decision = route(catalog, messages);
+    if (!decision.model) {
+      return c.json({ error: "Auto routing found no available model" }, 503);
+    }
+    model = decision.model;
+    task = decision.task;
+    routed = true;
   }
 
-  // Persist the user's turn immediately, so a crash mid-inference still
-  // leaves the question on record.
+  // Record the question and mark the thread as running before handing off, so
+  // another device that loads mid-run knows to attach.
   const existing = await getConversation(kv, userId, conversationId);
-  const base: Conversation = existing ?? {
+  const conv: Conversation = existing ?? {
     id: conversationId,
     title: body.title ?? deriveTitle(messages),
     model,
@@ -178,59 +204,52 @@ app.post("/api/chat", async (c) => {
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
-  base.model = model;
-  base.messages = messages;
-  base.updatedAt = Date.now();
-  if (base.title === "New Chat") base.title = deriveTitle(messages);
-  await saveConversation(kv, userId, base);
+  conv.model = model;
+  conv.messages = messages;
+  conv.updatedAt = Date.now();
+  conv.status = "generating";
+  conv.lastError = undefined;
+  if (!conv.title || conv.title === "New Chat") conv.title = deriveTitle(messages);
+  await saveConversation(kv, userId, conv);
 
-  let result;
-  try {
-    result = await streamInference(
-      messages.map((m) => ({ role: m.role, content: m.content })),
-      model,
-      c.env
-    );
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : "Inference failed";
-    console.error("Inference error:", detail);
-    return c.json({ error: detail }, 502);
-  }
-
-  // Capture the assistant reply server-side. This is what makes the thread
-  // survive a reload or a closed tab mid-stream (cancel() resolves with the
-  // partial text rather than dropping it).
-  c.executionCtx.waitUntil(
-    result.completion
-      .then(async ({ text, reasoning }) => {
-        if (!text && !reasoning) return;
-        const fresh = (await getConversation(kv, userId, conversationId)) ?? base;
-        fresh.messages = [
-          ...messages,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            content: text,
-            reasoning: reasoning || undefined,
-            createdAt: Date.now(),
-          },
-        ];
-        fresh.updatedAt = Date.now();
-        await saveConversation(kv, userId, fresh);
-      })
-      .catch((e) => console.error("Failed to persist assistant reply:", e))
+  return sessionStub(c, conversationId).fetch(
+    new Request("https://session/start", {
+      method: "POST",
+      body: JSON.stringify({ userId, conversationId, messages, model, title: conv.title, task, routed }),
+    })
   );
-
-  return new Response(result.stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      "X-Conversation-Id": conversationId,
-    },
-  });
 });
 
+/** Re-attach to a run already in progress, replaying from `from`. */
+app.get("/api/chat/attach", async (c) => {
+  const conversationId = c.req.query("conversationId");
+  if (!conversationId) return c.json({ error: "Missing conversationId" }, 400);
+  const from = c.req.query("from") ?? "0";
+  return sessionStub(c, conversationId).fetch(
+    new Request(`https://session/attach?from=${encodeURIComponent(from)}`)
+  );
+});
+
+app.get("/api/chat/status", async (c) => {
+  const conversationId = c.req.query("conversationId");
+  if (!conversationId) return c.json({ error: "Missing conversationId" }, 400);
+  return sessionStub(c, conversationId).fetch(new Request("https://session/status"));
+});
+
+app.post("/api/chat/cancel", async (c) => {
+  const { conversationId } = await c.req.json<{ conversationId?: string }>().catch(() => ({ conversationId: undefined }));
+  if (!conversationId) return c.json({ error: "Missing conversationId" }, 400);
+  return sessionStub(c, conversationId).fetch(new Request("https://session/cancel", { method: "POST" }));
+});
+
+app.get("/api/usage", async (c) => {
+  const days = Math.min(90, Math.max(1, Number(c.req.query("days") ?? "30")));
+  return c.json(await summarizeUsage(c.env.OMNIGROK_KV, c.get("userId"), days));
+});
+
+app.get("/api/resources", async (c) => {
+  return c.json(await getInventory(c.env as CfEnv));
+});
 
 // --- Agents / Projects / MCP servers --------------------------------------
 // One generic CRUD surface; the three collections differ only in payload.
