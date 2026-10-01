@@ -316,7 +316,7 @@ export async function getAvailableModels(env: InferenceEnv): Promise<ModelInfo[]
 // --- Streaming + agent loop ----------------------------------------------
 
 import { BUILTIN_TOOLS, dispatchTool, type ToolEnv, type Toolset } from "./tools";
-import { markCooling, isCooling, parseRateLimit } from "./cooldown";
+import { markCooling, isCooling, parseRateLimit, loadCooldowns } from "./cooldown";
 
 export type StreamEvent =
   | { type: "token"; content: string }
@@ -394,6 +394,10 @@ async function callProvider(
       temperature: 0.7,
       ...(withTools && toolSchemas.length ? { tools: toolSchemas, tool_choice: "auto" } : {}),
     }),
+    // A hung upstream must not stall the whole turn. 60s is generous for a
+    // first streaming byte; AbortError is caught by the caller and treated as
+    // a failover trigger, matching fetchOmniRouteModels' timeout posture.
+    signal: AbortSignal.timeout(60_000),
   });
 }
 
@@ -412,6 +416,13 @@ async function* runAgent(
   kv?: KVNamespace
 ): AsyncGenerator<StreamEvent, { text: string; reasoning: string }> {
   const toolSchemas = toolset?.schemas ?? BUILTIN_TOOLS;
+
+  // Pull the shared cooldown list into this isolate's Map first. Workers run
+  // many isolates concurrently; without this a model parked by another isolate
+  // is invisible here and both isCooling() below and the mid-turn failover
+  // checks would re-select it. Best-effort: a KV miss leaves the hot path on
+  // in-memory state, which is still correct for this isolate.
+  if (kv) await loadCooldowns(kv);
 
   // Skip anything already known to be cooling; keep one entry so a fully
   // cooled-down list still attempts something rather than failing blind.
@@ -432,14 +443,53 @@ async function* runAgent(
   let usage: { input: number; output: number; total: number } | null = null;
   let useTools = enableTools;
 
+  // Advances `model`/`url`/`key`/`providerModel` to the next warm candidate.
+  // Returns the chosen model id, or null when the queue is exhausted.
+  const advanceToNextWarm = (): string | null => {
+    const next = queue.slice(attempt + 1).find((m) => !isCooling(m));
+    if (!next) return null;
+    const r = resolveProvider(next, env);
+    if (!r) return null;
+    attempt = queue.indexOf(next);
+    model = next;
+    ({ url, key, model: providerModel } = r);
+    return next;
+  };
+
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-    let res = await callProvider(url, key, providerModel, convo, useTools, toolSchemas);
+    let res: Response;
+    try {
+      res = await callProvider(url, key, providerModel, convo, useTools, toolSchemas);
+    } catch (err) {
+      // Network error, DNS failure, or the 60s AbortSignal.timeout firing on a
+      // hung upstream. Treat exactly like a dead upstream: fail over to the
+      // next warm candidate rather than killing the turn.
+      const reason = err instanceof Error ? err.message : String(err);
+      if (advanceToNextWarm()) {
+        yield { type: "model", model, reason: `previous model unreachable (${reason})` };
+        turn -= 1; // this attempt did not consume a tool turn
+        continue;
+      }
+      throw new Error(`All candidate models are unreachable. Last error: ${reason}`);
+    }
 
     // Not every OpenAI-compatible endpoint accepts a `tools` array. If that is
     // what it rejected, drop tools and try once more rather than failing.
-    if (!res.ok && useTools && res.status >= 400 && res.status < 500) {
+    // Exclude 429 (rate-limit): a 429 must go straight to the cooldown/failover
+    // path below, not a same-model retry with tools stripped.
+    if (!res.ok && useTools && res.status >= 400 && res.status < 500 && res.status !== 429) {
       useTools = false;
-      res = await callProvider(url, key, providerModel, convo, false, toolSchemas);
+      try {
+        res = await callProvider(url, key, providerModel, convo, false, toolSchemas);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        if (advanceToNextWarm()) {
+          yield { type: "model", model, reason: `previous model unreachable (${reason})` };
+          turn -= 1;
+          continue;
+        }
+        throw new Error(`All candidate models are unreachable. Last error: ${reason}`);
+      }
     }
     if (!res.ok || !res.body) {
       const detail = await res.text().catch(() => "");
@@ -451,25 +501,31 @@ async function* runAgent(
         if (kv) {
           await markCooling(kv, limit.model ?? model, limit.resetSeconds, limit.message);
         }
-        const next = queue.slice(attempt + 1).find((m) => !isCooling(m));
-        if (next) {
-          attempt = queue.indexOf(next);
-          model = next;
-          const r = resolveProvider(model, env);
-          if (r) {
-            ({ url, key, model: providerModel } = r);
-            yield {
-              type: "model",
-              model,
-              reason: `previous model rate limited (retry in ${limit.resetSeconds}s)`,
-            };
-            turn -= 1; // this attempt did not consume a tool turn
-            continue;
-          }
+        if (advanceToNextWarm()) {
+          yield {
+            type: "model",
+            model,
+            reason: `previous model rate limited (retry in ${limit.resetSeconds}s)`,
+          };
+          turn -= 1; // this attempt did not consume a tool turn
+          continue;
         }
         throw new Error(
           `All candidate models are rate limited. ${limit.message} Retry in ${limit.resetSeconds}s.`
         );
+      }
+
+      // Any other non-OK response (5xx dead upstream, 4xx the strip-tools retry
+      // did not resolve) is a dead upstream from our side: fail over to the next
+      // warm candidate before giving up, matching the rate-limit path.
+      if (advanceToNextWarm()) {
+        yield {
+          type: "model",
+          model,
+          reason: `previous model error ${res.status}`,
+        };
+        turn -= 1; // this attempt did not consume a tool turn
+        continue;
       }
 
       throw new Error(`Provider API error ${res.status}: ${detail.slice(0, 300)}`);

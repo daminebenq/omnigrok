@@ -113,6 +113,12 @@ export function parseRateLimit(status: number, body: string, retryAfter?: string
     }
   }
 
-  const isRateLimit = status === 429 || /cooling down|rate.?limit|quota|too many requests/i.test(body);
+  // A 429 is always a rate limit. The body-text heuristic only applies to
+  // statuses that plausibly signal throttling (429/503) so a 400 that merely
+  // mentions "quota" in an unrelated error does not park a healthy model.
+  const throttleStatus = status === 429 || status === 503;
+  const isRateLimit =
+    status === 429 ||
+    (throttleStatus && /cooling down|rate.?limit|quota|too many requests/i.test(body));
   return { isRateLimit, model, resetSeconds, message };
 }

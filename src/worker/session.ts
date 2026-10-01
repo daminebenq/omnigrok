@@ -271,7 +271,9 @@ export class ChatSession implements DurableObject {
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
-      conv.model = payload.model;
+      // Reflect the model that actually produced the answer, which may differ
+      // from the requested one after a mid-turn rate-limit/error failover.
+      conv.model = this.actualModel ?? payload.model;
       conv.messages = [
         ...payload.messages,
         {

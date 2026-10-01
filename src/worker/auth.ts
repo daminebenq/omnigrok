@@ -100,15 +100,24 @@ export async function validateCfAccessToken(
     );
     if (!ok) return null;
 
-    const payload = decodeSegment<CfAccessPayload>(payloadB64);
+    const payload = decodeSegment<CfAccessPayload & { iss?: string }>(payloadB64);
 
+    // 60s skew allowance absorbs small clock differences between the edge and
+    // this isolate without widening the window meaningfully.
     const now = Math.floor(Date.now() / 1000);
-    if (typeof payload.exp !== "number" || payload.exp < now) return null;
+    const SKEW = 60;
+    if (typeof payload.exp !== "number" || payload.exp < now - SKEW) return null;
 
-    if (allowedAud) {
-      const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-      if (!auds.includes(allowedAud)) return null;
-    }
+    // Reject a token minted for a different Access team even if it shares a key
+    // surface. The issuer is always the team domain.
+    if (payload.iss && payload.iss !== `https://${teamDomain}`) return null;
+
+    // A missing/empty allowedAud must reject, never fall through to
+    // accept-any-audience: an audience check that silently does nothing is a
+    // fail-open misconfiguration.
+    if (!allowedAud) return null;
+    const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+    if (!auds.includes(allowedAud)) return null;
 
     if (!payload.sub) return null;
     return payload;

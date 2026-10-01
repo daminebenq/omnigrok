@@ -27,6 +27,8 @@ interface JsonRpcResponse {
   error?: { code: number; message: string };
 }
 
+import { assertBrowsableUrl } from "./browse";
+
 const PROTOCOL_VERSION = "2025-06-18";
 const TIMEOUT_MS = 30_000;
 
@@ -84,7 +86,12 @@ export class McpClient {
   constructor(
     private url: string,
     private auth: McpAuth = {}
-  ) {}
+  ) {
+    // Same SSRF guard as the browser panel: an MCP server URL is user-supplied
+    // and fetched server-side, so reject loopback/link-local/metadata targets
+    // before any request. Throws on an invalid or blocked URL.
+    assertBrowsableUrl(url);
+  }
 
   private async call(method: string, params?: unknown, notify = false): Promise<any> {
     const id = notify ? undefined : this.nextId++;

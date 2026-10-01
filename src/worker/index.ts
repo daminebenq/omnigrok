@@ -88,11 +88,17 @@ app.use("/api/*", async (c, next) => {
   // Only the Access-injected header is trusted. A client-supplied bearer token
   // would be an authentication bypass.
   const token = c.req.header("CF-Access-Jwt-Assertion") ?? null;
-  const payload = await validateCfAccessToken(
-    token,
-    c.env.ALLOWED_AUD ?? "",
-    c.env.ACCESS_TEAM_DOMAIN ?? ""
-  );
+  let payload;
+  try {
+    payload = await validateCfAccessToken(
+      token,
+      c.env.ALLOWED_AUD ?? "",
+      c.env.ACCESS_TEAM_DOMAIN ?? ""
+    );
+  } catch {
+    // JWKS fetch failure or any unexpected throw must surface as 401, not 500.
+    return c.json({ error: "Unauthorized" }, 401);
+  }
   if (!payload) return c.json({ error: "Unauthorized" }, 401);
   c.set("userId", payload.sub);
   c.set("userEmail", payload.email);
@@ -206,10 +212,17 @@ app.post("/api/chat", async (c) => {
   // single upstream is exactly what surfaced a 429 to the user.
   const autoRouted = isAutoRouter(model);
   if (autoRouted) {
+    // Any auto/* router (including "auto/best-coding" from the catalog) should
+    // use the gateway's server-side failover, not our client-side fallbacks.
+    // Only bare "auto" needs to be resolved to a task-appropriate router first.
     if (model === "auto") {
       const decision = routeAuto(catalog, messages, DEFAULT_AUTO_MODEL, AUTO_ROUTERS);
       model = decision.model;
       task = decision.task;
+      routed = true;
+    } else {
+      // model is already an auto/* router from the catalog - use as-is
+      task = classify(messages).task;
       routed = true;
     }
   } else if (isCooling(model)) {
